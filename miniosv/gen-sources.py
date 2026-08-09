@@ -61,6 +61,13 @@ EXCLUDED = {
     # with "OVERRIDE_NEW_DELETE not properly defined" -- and we do not want
     # jemalloc taking over global new/delete from miniOSv's allocator.
     "jemalloc_cpp.cpp",
+    # Replaced by miniosv/fs/local_file_system.cpp: on miniOSv miniext IS the
+    # local filesystem, and upstream's version is built entirely on POSIX calls
+    # that fail here. Replacing the class rather than adding one beside it means
+    # FileSystem::CreateLocal() -- which is static, and which the benchmark
+    # runner calls in four places -- returns the right thing without any call
+    # site being told.
+    "local_file_system.cpp",
 }
 
 

@@ -78,6 +78,7 @@ app-objects  = $(duckdb-objects)
 app-objects += $(duckdb-miniosv)/main.o
 app-objects += $(duckdb-miniosv)/static_extensions.o
 app-objects += $(duckdb-miniosv)/stubs/posix_stubs.o
+app-objects += $(duckdb-miniosv)/fs/local_file_system.o
 
 # Apply the flags to every DuckDB object. Target-specific variables cover the
 # whole app/miniduckdb subtree, so this reaches the generated file list without
@@ -97,6 +98,7 @@ $(out)/$(duckdb-dir)/src/common/allocator/allocator_jemalloc.o: CXXFLAGS += \
 # the same include path and shim as the engine.
 $(out)/$(duckdb-miniosv)/static_extensions.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/stubs/posix_stubs.o: CXXFLAGS += $(duckdb-cxxflags)
+$(out)/$(duckdb-miniosv)/fs/local_file_system.o: CXXFLAGS += $(duckdb-cxxflags)
 
 # main.cc talks to both DuckDB and miniext.
 $(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += $(duckdb-includes) \

@@ -3,8 +3,8 @@
 # The DuckDB sources compiled into the kernel image, and the include
 # directories they need. Paths are relative to the miniOSv root.
 
-duckdb-version   := v1.5.5
-duckdb-source-id := d8cdaa33fd
+duckdb-version   := v1.5.6-dev1
+duckdb-source-id := fdc0f738e9
 
 duckdb-include-dirs :=
 duckdb-include-dirs += app/miniduckdb/src/include
@@ -47,7 +47,7 @@ duckdb-include-dirs += app/miniduckdb/third_party/snappy
 duckdb-include-dirs += app/miniduckdb/third_party/lz4
 duckdb-include-dirs += app/miniduckdb/third_party/brotli
 
-# --- DuckDB engine and its third-party dependencies (1475 files)
+# --- DuckDB engine and its third-party dependencies (1474 files)
 duckdb-sources :=
 duckdb-sources += app/miniduckdb/src/catalog/catalog.cpp
 duckdb-sources += app/miniduckdb/src/catalog/catalog_entry/aggregate_function_catalog_entry.cpp
@@ -154,7 +154,6 @@ duckdb-sources += app/miniduckdb/src/common/filename_pattern.cpp
 duckdb-sources += app/miniduckdb/src/common/fsst.cpp
 duckdb-sources += app/miniduckdb/src/common/gzip_file_system.cpp
 duckdb-sources += app/miniduckdb/src/common/hive_partitioning.cpp
-duckdb-sources += app/miniduckdb/src/common/local_file_system.cpp
 duckdb-sources += app/miniduckdb/src/common/multi_file/base_file_reader.cpp
 duckdb-sources += app/miniduckdb/src/common/multi_file/multi_file_column_mapper.cpp
 duckdb-sources += app/miniduckdb/src/common/multi_file/multi_file_function.cpp

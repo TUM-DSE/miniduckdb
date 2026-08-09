@@ -1,36 +1,141 @@
-// DuckDB on miniOSv: the application entry point.
-//
-// A placeholder for now -- it brings the engine up, mounts the data disk with
-// miniext and runs one query, which is enough to prove the build links and the
-// filesystem is reachable. The serial-console REPL is Step 9.
+/*
+ * DuckDB on miniOSv: the application entry point.
+ *
+ * miniOSv links one application into the kernel and enters it through
+ * osv_app_main(), so which program runs is decided here rather than by exec'ing
+ * a binary. The first word of the boot-disk argument block names the
+ * executable and the rest becomes its argv:
+ *
+ *     scripts/run.py --args "benchmark --list"
+ *     scripts/run.py --args "duckdb -c 'SELECT 42'"
+ *
+ * Both executables are upstream DuckDB programs with their own main(), reached
+ * through the thin wrappers below.
+ */
 
 #include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include <osv/bootargs.hh>
+
+#include "modules/miniext/miniext.hh"
 
 #include "duckdb.hpp"
-#include "modules/miniext/miniext.hh"
+
+namespace {
+
+// NVMe controller 1 is the data disk (run.py --emulated-nvme); 0 is the boot
+// disk. Mounting is best-effort so an image with no data disk still starts.
+const int DATA_NVME_ID = 1;
+const char *MOUNT_POINT = "/db";
+
+struct executable {
+	const char *name;
+	int (*run)(int argc, char **argv);
+};
+
+// Runs SQL against a real on-disk database through MiniextFileSystem. This is
+// the scaffolding the benchmark runner and the CLI plug into once their
+// LocalFileSystem dependency is settled; see PLAN.md.
+int run_sql(int argc, char **argv)
+{
+	const char *database = nullptr;
+	std::vector<const char *> statements;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
+			database = argv[++i];
+		} else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+			statements.push_back(argv[++i]);
+		}
+	}
+
+	// No file_system override: DuckDB's default is
+	// VirtualFileSystem(FileSystem::CreateLocal()), and CreateLocal() now
+	// returns the miniext-backed LocalFileSystem.
+	duckdb::DuckDB db(database);
+	duckdb::Connection con(db);
+
+	if (statements.empty()) {
+		statements.push_back("SELECT 42 AS answer");
+	}
+	for (const char *sql : statements) {
+		printf("\n> %s\n", sql);
+		auto result = con.Query(sql);
+		if (result->HasError()) {
+			printf("Error: %s\n", result->GetError().c_str());
+		} else {
+			printf("%s\n", result->ToString().c_str());
+		}
+	}
+	return 0;
+}
+
+const executable executables[] = {
+	{"sql", run_sql},
+};
+
+const executable *find_executable(const char *name)
+{
+	for (const auto &e : executables) {
+		if (strcmp(e.name, name) == 0) {
+			return &e;
+		}
+	}
+	return nullptr;
+}
+
+void usage()
+{
+	printf("executables:");
+	for (const auto &e : executables) {
+		printf(" %s", e.name);
+	}
+	printf("\nset them with: scripts/run.py --args \"<executable> [args...]\"\n");
+}
+
+} // namespace
 
 extern "C" void osv_app_main()
 {
-    printf("\n######## DuckDB on miniOSv ########\n\n");
+	printf("\n######## DuckDB on miniOSv ########\n\n");
 
-    // NVMe controller 1 is the --emulated-nvme data disk; 0 is the boot image.
-    int rc = miniext::mount(1, "/db");
-    if (rc < 0) {
-        printf("miniext: mount failed (%d); continuing in memory only\n", rc);
-    }
+	int rc = miniext::mount(DATA_NVME_ID, MOUNT_POINT);
+	if (rc < 0) {
+		printf("miniext: no data disk (%d); continuing without one\n", rc);
+	}
 
-    duckdb::DuckDB db(nullptr);
-    duckdb::Connection con(db);
+	std::vector<std::string> words = osv::bootargs_split(osv::bootargs());
+	if (words.empty()) {
+		printf("no boot arguments.\n");
+		usage();
+		while (true) {
+			asm volatile("" ::: "memory");
+		}
+	}
 
-    auto result = con.Query("SELECT 42 AS answer");
-    if (result->HasError()) {
-        printf("query failed: %s\n", result->GetError().c_str());
-    } else {
-        printf("SELECT 42 -> %s\n", result->ToString().c_str());
-    }
+	const executable *exe = find_executable(words[0].c_str());
+	if (!exe) {
+		printf("no executable named '%s'.\n", words[0].c_str());
+		usage();
+		while (true) {
+			asm volatile("" ::: "memory");
+		}
+	}
 
-    printf("\n######## DuckDB on miniOSv: engine up ########\n");
-    while (true) {
-        asm volatile("" ::: "memory");
-    }
+	// argv[0] is the executable name, as a program expects.
+	std::vector<char *> argv;
+	for (auto &w : words) {
+		argv.push_back(const_cast<char *>(w.c_str()));
+	}
+	argv.push_back(nullptr);
+
+	int status = exe->run(static_cast<int>(argv.size()) - 1, argv.data());
+	printf("\n%s exited with %d\n", exe->name, status);
+
+	// Do not power off: keep the serial output visible on the console.
+	while (true) {
+		asm volatile("" ::: "memory");
+	}
 }
