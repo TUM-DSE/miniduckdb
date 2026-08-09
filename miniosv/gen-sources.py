@@ -34,7 +34,8 @@ import amalgamation  # noqa: E402  (needs the path above)
 #   core_functions  required: TPC-H fails on sum/avg/extract without it
 #   parquet         read_parquet / COPY TO ... (PARQUET)
 #   tpch            dbgen + the 22 queries
-EXTENSIONS = ["core_functions", "parquet", "tpch"]
+#   autocomplete    the CLI's tab completion; shell.cpp includes its header
+EXTENSIONS = ["core_functions", "parquet", "tpch", "autocomplete"]
 
 # Third-party trees pulled in only by the extensions above (parquet needs
 # thrift for the file format and the compression codecs).
@@ -50,6 +51,23 @@ EXTENSION_THIRD_PARTY = [
 # duckdb_je_, so it does not replace miniOSv's malloc; DuckDB reaches it
 # through its own Allocator.
 JEMALLOC_DIR = "third_party/jemalloc/src"
+
+# The benchmark runner (https://duckdb.org/docs/current/dev/benchmark). It has
+# its own main(), which miniosv.mk renames so the dispatcher can call it.
+# interpreted_benchmark.cpp reads the .benchmark files at run time through
+# FileSystem, so they live on the data disk rather than in the image.
+BENCHMARK_DIRS = ["benchmark"]
+
+# interpreted_benchmark.cpp uses exactly one function from the test helpers,
+# DeleteDatabase(). Building test/helpers/test_helpers.cpp to get it drags in
+# the whole test framework (TestConfiguration, catch's main, duckdb::getpid),
+# so miniosv/benchmark_support.cc supplies that one function instead.
+BENCHMARK_EXTRA = []
+
+# The DuckDB CLI. Its main() is renamed by miniosv.mk, like the benchmark
+# runner's. tests/ is upstream's own test harness and is not built.
+SHELL_DIRS = ["tools/shell"]
+SHELL_SKIP = ("tools/shell/tests",)
 
 # Files that are #included by another source rather than compiled on their own.
 # DuckDB keeps the same list in scripts/package_build.py:9.
@@ -97,6 +115,12 @@ def main():
     for tp in EXTENSION_THIRD_PARTY:
         groups.append((f"extension dependency: {os.path.basename(tp)}", walk(tp)))
     groups.append(("jemalloc (duckdb_je_ prefixed)", walk(JEMALLOC_DIR)))
+    for d in BENCHMARK_DIRS:
+        groups.append((f"benchmark runner: {d}", walk(d)))
+    for d in SHELL_DIRS:
+        srcs = [s for s in walk(d) if not s.startswith(SHELL_SKIP)]
+        groups.append((f"CLI: {d}", srcs))
+    groups.append(("benchmark runner: test helpers", sorted(BENCHMARK_EXTRA)))
 
     include_dirs = amalgamation.list_include_dirs()
 
@@ -110,6 +134,12 @@ def main():
     for tp in EXTENSION_THIRD_PARTY:
         if os.path.isdir(os.path.join(ROOT, tp)):
             include_dirs.append(tp)
+    # The benchmark runner's own headers, and the test helpers it borrows.
+    for d in ["benchmark/include", "test/include", "third_party/catch",
+              "tools/shell/include", "tools/shell/linenoise/include",
+              "extension/autocomplete/include"]:
+        if os.path.isdir(os.path.join(ROOT, d)):
+            include_dirs.append(d)
 
     # Upstream's CMake derives these from git, and pragma_version.cpp will not
     # compile without them. Capture them here so `make` needs no git.

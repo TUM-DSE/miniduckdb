@@ -49,8 +49,12 @@ duckdb-defines := -DDUCKDB_DISABLE_BUILTIN_HTTPLIB \
 duckdb-commonflags := $(duckdb-includes) $(jemalloc-includes) $(duckdb-defines) \
                       -w -Wno-error
 
+# fstream_shim.hpp supplies std::ifstream/ofstream: libc++ here is built with
+# LIBCXX_ENABLE_FILESYSTEM=OFF, so <iosfwd> declares them but <fstream> never
+# defines them. The benchmark runner reads every .benchmark file with one.
 duckdb-cxxflags := $(duckdb-commonflags) \
-                   -include $(duckdb-miniosv)/stubs/wchar_shim.hpp
+                   -include $(duckdb-miniosv)/stubs/wchar_shim.hpp \
+                   -include $(duckdb-miniosv)/stubs/fstream_shim.hpp
 duckdb-cflags   := $(duckdb-commonflags)
 
 # aarch64 compiles -nostdinc, which hides clang's own freestanding headers and
@@ -77,8 +81,10 @@ duckdb-objects := $(duckdb-objects:.c=.o)
 app-objects  = $(duckdb-objects)
 app-objects += $(duckdb-miniosv)/main.o
 app-objects += $(duckdb-miniosv)/static_extensions.o
+app-objects += $(duckdb-miniosv)/benchmark_support.o
 app-objects += $(duckdb-miniosv)/stubs/posix_stubs.o
 app-objects += $(duckdb-miniosv)/fs/local_file_system.o
+app-objects += $(duckdb-miniosv)/fs/fstream_shim.o
 
 # Apply the flags to every DuckDB object. Target-specific variables cover the
 # whole app/miniduckdb subtree, so this reaches the generated file list without
@@ -94,18 +100,34 @@ $(out)/$(duckdb-dir)/extension/tpch/%.o: CXXFLAGS += $(duckdb-tpch-flags)
 $(out)/$(duckdb-dir)/src/common/allocator/allocator_jemalloc.o: CXXFLAGS += \
     -include duckdb/common/string_util.hpp
 
+# The benchmark runner ships its own main(). Rename it so it can be linked
+# alongside the kernel's osv_app_main() and called from the dispatcher; after
+# the macro it is an ordinary C++ function, not a program entry point.
+# DUCKDB_ROOT_DIRECTORY is a CMake define upstream: the directory the runner
+# resolves benchmark paths against. The .benchmark files live on the data disk,
+# so it is the mount point here.
+$(out)/$(duckdb-dir)/benchmark/benchmark_runner.o: CXXFLAGS += \
+    -Dmain=duckdb_benchmark_main -DDUCKDB_ROOT_DIRECTORY=\"/db\"
+
+# The CLI ships its own main() too. Its signature takes const char **, so
+# main.cc wraps it rather than calling it directly.
+$(out)/$(duckdb-dir)/tools/shell/shell.o: CXXFLAGS += -Dmain=duckdb_shell_main
+
 # The miniosv/ sources use DuckDB's headers but are ours, so they build with
 # the same include path and shim as the engine.
 $(out)/$(duckdb-miniosv)/static_extensions.o: CXXFLAGS += $(duckdb-cxxflags)
+$(out)/$(duckdb-miniosv)/benchmark_support.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/stubs/posix_stubs.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/fs/local_file_system.o: CXXFLAGS += $(duckdb-cxxflags)
+$(out)/$(duckdb-miniosv)/fs/fstream_shim.o: CXXFLAGS += $(duckdb-cxxflags)
 
 # main.cc talks to both DuckDB and miniext.
 $(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += $(duckdb-includes) \
     -I$(duckdb-dir)/extension/core_functions/include \
     -I$(duckdb-dir)/extension/parquet/include \
     -I$(duckdb-dir)/extension/tpch/include \
-    -include $(duckdb-miniosv)/stubs/wchar_shim.hpp -w -Wno-error
+    -include $(duckdb-miniosv)/stubs/wchar_shim.hpp \
+    -include $(duckdb-miniosv)/stubs/fstream_shim.hpp -w -Wno-error
 
 # --- rules ------------------------------------------------------------------
 

@@ -13,6 +13,7 @@
 // start catch.hpp
 
 #include <memory>
+#include <osv/terminal.h>   // miniOSv: no ioctl
 #include <sstream>
 
 #ifndef DUCKDB_BASE_STD
@@ -13431,8 +13432,9 @@ namespace Catch {
             GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
             return csbi.srWindow.Right - csbi.srWindow.Left + 1;
 #else
+            // miniOSv: no ioctl; the console answers for its own geometry.
             struct winsize w;
-            ioctl(0, TIOCGWINSZ, &w);
+            osv_terminal_size(&w);
             return w.ws_col;
 #endif
         }

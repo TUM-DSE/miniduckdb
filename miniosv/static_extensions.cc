@@ -18,6 +18,7 @@
 #include "core_functions_extension.hpp"
 #include "parquet_extension.hpp"
 #include "tpch_extension.hpp"
+#include "autocomplete_extension.hpp"
 
 namespace duckdb {
 
@@ -28,6 +29,21 @@ void ExtensionHelper::LoadAllExtensions(DuckDB &db)
 	db.LoadStaticExtension<CoreFunctionsExtension>();
 	db.LoadStaticExtension<ParquetExtension>();
 	db.LoadStaticExtension<TpchExtension>();
+	// The CLI's tab completion.
+	db.LoadStaticExtension<AutocompleteExtension>();
+}
+
+//! Named lookup, for callers that ask for an extension by string (the
+//! benchmark runner's `load` directive). Everything is already linked in and
+//! registered by LoadAllExtensions, so this only has to report whether the name
+//! is one of ours.
+ExtensionLoadResult ExtensionHelper::LoadExtension(DuckDB &db, const std::string &extension)
+{
+	if (extension == "core_functions" || extension == "parquet" ||
+	    extension == "tpch" || extension == "autocomplete") {
+		return ExtensionLoadResult::LOADED_EXTENSION;
+	}
+	return ExtensionLoadResult::NOT_LOADED;
 }
 
 vector<string> ExtensionHelper::LoadedExtensionTestPaths()

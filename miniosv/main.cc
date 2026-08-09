@@ -24,6 +24,12 @@
 
 #include "duckdb.hpp"
 
+// The benchmark runner's main(), renamed by miniosv.mk. C++ linkage, because
+// after -Dmain=... it is an ordinary function.
+int duckdb_benchmark_main(int argc, char **argv);
+//! The CLI's main() takes const char **, hence the wrapper below.
+int duckdb_shell_main(int argc, const char **argv);
+
 namespace {
 
 // NVMe controller 1 is the data disk (run.py --emulated-nvme); 0 is the boot
@@ -72,8 +78,15 @@ int run_sql(int argc, char **argv)
 	return 0;
 }
 
+int run_cli(int argc, char **argv)
+{
+	return duckdb_shell_main(argc, const_cast<const char **>(argv));
+}
+
 const executable executables[] = {
 	{"sql", run_sql},
+	{"benchmark", duckdb_benchmark_main},
+	{"duckdb", run_cli},
 };
 
 const executable *find_executable(const char *name)

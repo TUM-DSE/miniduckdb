@@ -3,8 +3,8 @@
 # The DuckDB sources compiled into the kernel image, and the include
 # directories they need. Paths are relative to the miniOSv root.
 
-duckdb-version   := v1.5.6-dev1
-duckdb-source-id := fdc0f738e9
+duckdb-version   := v1.5.6-dev2
+duckdb-source-id := bd52f8a3e3
 
 duckdb-include-dirs :=
 duckdb-include-dirs += app/miniduckdb/src/include
@@ -41,11 +41,18 @@ duckdb-include-dirs += app/miniduckdb/third_party/zstd/include
 duckdb-include-dirs += app/miniduckdb/extension/core_functions/include
 duckdb-include-dirs += app/miniduckdb/extension/parquet/include
 duckdb-include-dirs += app/miniduckdb/extension/tpch/include
+duckdb-include-dirs += app/miniduckdb/extension/autocomplete/include
 duckdb-include-dirs += app/miniduckdb/third_party/parquet
 duckdb-include-dirs += app/miniduckdb/third_party/thrift
 duckdb-include-dirs += app/miniduckdb/third_party/snappy
 duckdb-include-dirs += app/miniduckdb/third_party/lz4
 duckdb-include-dirs += app/miniduckdb/third_party/brotli
+duckdb-include-dirs += app/miniduckdb/benchmark/include
+duckdb-include-dirs += app/miniduckdb/test/include
+duckdb-include-dirs += app/miniduckdb/third_party/catch
+duckdb-include-dirs += app/miniduckdb/tools/shell/include
+duckdb-include-dirs += app/miniduckdb/tools/shell/linenoise/include
+duckdb-include-dirs += app/miniduckdb/extension/autocomplete/include
 
 # --- DuckDB engine and its third-party dependencies (1474 files)
 duckdb-sources :=
@@ -1702,6 +1709,55 @@ duckdb-sources += app/miniduckdb/extension/tpch/dbgen/speed_seed.cpp
 duckdb-sources += app/miniduckdb/extension/tpch/dbgen/text.cpp
 duckdb-sources += app/miniduckdb/extension/tpch/tpch_extension.cpp
 
+# --- extension: autocomplete (46 files)
+
+duckdb-sources += app/miniduckdb/extension/autocomplete/autocomplete_extension.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/keyword_helper.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/keyword_map.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/matcher.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/parser/peg_parser.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/tokenizer.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/peg_transformer.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/peg_transformer_factory.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_alter.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_analyze.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_attach.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_call.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_checkpoint.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_comment.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_common.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_copy.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_index.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_macro.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_schema.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_secret.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_sequence.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_table.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_type.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_create_view.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_deallocate.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_delete.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_describe.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_detach.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_drop.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_execute.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_explain.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_export.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_expression.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_import.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_insert.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_load.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_merge_into.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_pivot.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_pragma.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_prepare.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_select.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_set.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_transaction.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_update.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_use.cpp
+duckdb-sources += app/miniduckdb/extension/autocomplete/transformer/transform_vacuum.cpp
+
 # --- extension dependency: parquet (1 files)
 
 duckdb-sources += app/miniduckdb/third_party/parquet/parquet_types.cpp
@@ -1823,3 +1879,38 @@ duckdb-sources += app/miniduckdb/third_party/jemalloc/src/tsd.c
 duckdb-sources += app/miniduckdb/third_party/jemalloc/src/util.c
 duckdb-sources += app/miniduckdb/third_party/jemalloc/src/witness.c
 duckdb-sources += app/miniduckdb/third_party/jemalloc/src/zone.c
+
+# --- benchmark runner: benchmark (9 files)
+
+duckdb-sources += app/miniduckdb/benchmark/benchmark_runner.cpp
+duckdb-sources += app/miniduckdb/benchmark/interpreted_benchmark.cpp
+duckdb-sources += app/miniduckdb/benchmark/micro/append.cpp
+duckdb-sources += app/miniduckdb/benchmark/micro/append_mix.cpp
+duckdb-sources += app/miniduckdb/benchmark/micro/bulkupdate.cpp
+duckdb-sources += app/miniduckdb/benchmark/micro/cast.cpp
+duckdb-sources += app/miniduckdb/benchmark/micro/in.cpp
+duckdb-sources += app/miniduckdb/benchmark/micro/storage.cpp
+duckdb-sources += app/miniduckdb/benchmark/tpch/startup.cpp
+
+# --- CLI: tools/shell (17 files)
+
+duckdb-sources += app/miniduckdb/tools/shell/linenoise/highlighting.cpp
+duckdb-sources += app/miniduckdb/tools/shell/linenoise/history.cpp
+duckdb-sources += app/miniduckdb/tools/shell/linenoise/linenoise-c.cpp
+duckdb-sources += app/miniduckdb/tools/shell/linenoise/linenoise.cpp
+duckdb-sources += app/miniduckdb/tools/shell/linenoise/rendering.cpp
+duckdb-sources += app/miniduckdb/tools/shell/linenoise/terminal.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_command_line_option.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_extension.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_helpers.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_highlight.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_metadata_command.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_progress_bar.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_prompt.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_render_table_metadata.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_renderer.cpp
+duckdb-sources += app/miniduckdb/tools/shell/shell_windows.cpp
+
+# --- benchmark runner: test helpers (0 files)
+

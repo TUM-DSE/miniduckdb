@@ -26,6 +26,7 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 namespace std {
 
@@ -110,5 +111,7 @@ struct char_traits<wchar_t> {
 
 using wstring = basic_string<wchar_t>;
 using wstringstream = basic_stringstream<wchar_t>;
+// catch.hpp names this in a StringMaker specialisation.
+using wstring_view = basic_string_view<wchar_t>;
 
 } // namespace std
