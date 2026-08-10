@@ -141,20 +141,8 @@ double tgamma(double x)
 
 // --- calls miniOSv cannot serve --------------------------------------------
 
-// There is no fd table and no seekable stream: libc/stdio/llvm_stdio.cc only
-// backs the three standard streams, and fseeko/ftello there already return
-// ESPIPE. Reached only from yyjson's yyjson_read_fp, which nothing calls.
-int fseek(FILE *, long, int)
-{
-	errno = ESPIPE;
-	return -1;
-}
-
-long ftell(FILE *)
-{
-	errno = ESPIPE;
-	return -1;
-}
+// fseek/ftell live beside fseeko/ftello in libc/stdio/llvm_stdio.cc: they are
+// the kernel's business, not DuckDB's, and llama.cpp reaches them too.
 
 // No current directory and no path namespace outside miniext, which DuckDB
 // reaches through MiniextFileSystem rather than through libc. DuckDB's

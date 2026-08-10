@@ -54,7 +54,7 @@ duckdb-commonflags := $(duckdb-includes) $(jemalloc-includes) $(duckdb-defines) 
 # defines them. The benchmark runner reads every .benchmark file with one.
 duckdb-cxxflags := $(duckdb-commonflags) \
                    -include $(duckdb-miniosv)/stubs/wchar_shim.hpp \
-                   -include $(duckdb-miniosv)/stubs/fstream_shim.hpp
+                   -include include/osv/fstream_shim.hpp
 duckdb-cflags   := $(duckdb-commonflags)
 
 # aarch64 compiles -nostdinc, which hides clang's own freestanding headers and
@@ -84,7 +84,6 @@ app-objects += $(duckdb-miniosv)/static_extensions.o
 app-objects += $(duckdb-miniosv)/benchmark_support.o
 app-objects += $(duckdb-miniosv)/stubs/posix_stubs.o
 app-objects += $(duckdb-miniosv)/fs/local_file_system.o
-app-objects += $(duckdb-miniosv)/fs/fstream_shim.o
 
 # Apply the flags to every DuckDB object. Target-specific variables cover the
 # whole app/miniduckdb subtree, so this reaches the generated file list without
@@ -119,7 +118,6 @@ $(out)/$(duckdb-miniosv)/static_extensions.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/benchmark_support.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/stubs/posix_stubs.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/fs/local_file_system.o: CXXFLAGS += $(duckdb-cxxflags)
-$(out)/$(duckdb-miniosv)/fs/fstream_shim.o: CXXFLAGS += $(duckdb-cxxflags)
 
 # main.cc talks to both DuckDB and miniext.
 $(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += $(duckdb-includes) \
@@ -127,13 +125,6 @@ $(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += $(duckdb-includes) \
     -I$(duckdb-dir)/extension/parquet/include \
     -I$(duckdb-dir)/extension/tpch/include \
     -include $(duckdb-miniosv)/stubs/wchar_shim.hpp \
-    -include $(duckdb-miniosv)/stubs/fstream_shim.hpp -w -Wno-error
+    -include include/osv/fstream_shim.hpp -w -Wno-error
 
-# --- rules ------------------------------------------------------------------
-
-# The kernel has pattern rules for .cc/.c/.S/.s but not .cpp, which is what
-# DuckDB uses. Same recipe as the .cc rule in the top-level Makefile, including
-# the order-only dependency on the libc++ build.
-$(out)/%.o: %.cpp | generated-headers $(out)/.libcxx-built
-	$(makedir)
-	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX $*.cpp)
+# The .cpp pattern rule lives in the top-level Makefile: llama.cpp needs it too.

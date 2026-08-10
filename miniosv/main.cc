@@ -44,7 +44,7 @@ struct executable {
 
 // Runs SQL against a real on-disk database through MiniextFileSystem. This is
 // the scaffolding the benchmark runner and the CLI plug into once their
-// LocalFileSystem dependency is settled; see PLAN.md.
+// LocalFileSystem dependency is settled; see PLAN_duckdb.md.
 int run_sql(int argc, char **argv)
 {
 	const char *database = nullptr;
