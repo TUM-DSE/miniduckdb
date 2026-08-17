@@ -26,24 +26,31 @@ void ExtensionHelper::LoadAllExtensions(DuckDB &db)
 {
 	// core_functions is not optional in practice: without it TPC-H fails on
 	// sum/avg/extract, and so does most non-trivial SQL.
-	db.LoadStaticExtension<CoreFunctionsExtension>();
-	db.LoadStaticExtension<ParquetExtension>();
-	db.LoadStaticExtension<TpchExtension>();
+	LoadExtension(db, "core_functions");
+	LoadExtension(db, "parquet");
+	LoadExtension(db, "tpch");
 	// The CLI's tab completion.
-	db.LoadStaticExtension<AutocompleteExtension>();
+	LoadExtension(db, "autocomplete");
 }
 
-//! Named lookup, for callers that ask for an extension by string (the
-//! benchmark runner's `load` directive). Everything is already linked in and
-//! registered by LoadAllExtensions, so this only has to report whether the name
-//! is one of ours.
+//! Named lookup, for callers that ask for an extension by string (the benchmark
+//! runner's `require` directive). It has to do the registering, not just report
+//! availability: a benchmark opens its database with load_extensions off, so
+//! LoadAllExtensions never ran. LoadStaticExtension is idempotent.
 ExtensionLoadResult ExtensionHelper::LoadExtension(DuckDB &db, const std::string &extension)
 {
-	if (extension == "core_functions" || extension == "parquet" ||
-	    extension == "tpch" || extension == "autocomplete") {
-		return ExtensionLoadResult::LOADED_EXTENSION;
+	if (extension == "core_functions") {
+		db.LoadStaticExtension<CoreFunctionsExtension>();
+	} else if (extension == "parquet") {
+		db.LoadStaticExtension<ParquetExtension>();
+	} else if (extension == "tpch") {
+		db.LoadStaticExtension<TpchExtension>();
+	} else if (extension == "autocomplete") {
+		db.LoadStaticExtension<AutocompleteExtension>();
+	} else {
+		return ExtensionLoadResult::NOT_LOADED;
 	}
-	return ExtensionLoadResult::NOT_LOADED;
+	return ExtensionLoadResult::LOADED_EXTENSION;
 }
 
 vector<string> ExtensionHelper::LoadedExtensionTestPaths()

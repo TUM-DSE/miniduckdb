@@ -360,6 +360,8 @@ bool LocalFileSystem::ListFilesExtended(const string &directory,
 	int rc = miniext::list(path.c_str(), [&](const char *name, bool is_dir) {
 		any = true;
 		OpenFileInfo info{string(name)};
+		info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+		info.extended_info->options.emplace("type", Value(is_dir ? "directory" : "file"));
 		callback(info);
 	});
 	return rc < 0 ? false : any;
