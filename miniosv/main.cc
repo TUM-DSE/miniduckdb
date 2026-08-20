@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <osv/mempool.hh>
 #include <osv/bootargs.hh>
 
 #include "modules/miniext/miniext.hh"
@@ -146,6 +147,10 @@ extern "C" void osv_app_main()
 
 	int status = exe->run(static_cast<int>(argv.size()) - 1, argv.data());
 	printf("\n%s exited with %d\n", exe->name, status);
+
+	// Prints the allocation histogram when the kernel was built with
+	// conf_memory_histogram=1, and nothing otherwise.
+	memory::histogram_dump();
 
 	// Do not power off: keep the serial output visible on the console.
 	while (true) {
