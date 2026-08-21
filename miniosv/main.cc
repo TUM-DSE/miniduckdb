@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-#include <osv/mempool.hh>
+#include "core/mem/heap/histogram.hh"
 #include <osv/bootargs.hh>
 
 #include "modules/miniext/miniext.hh"
@@ -150,7 +150,7 @@ extern "C" void osv_app_main()
 
 	// Prints the allocation histogram when the kernel was built with
 	// conf_memory_histogram=1, and nothing otherwise.
-	memory::histogram_dump();
+	mem::heap::histogram_dump();
 
 	// Do not power off: keep the serial output visible on the console.
 	while (true) {
