@@ -19,6 +19,10 @@
 #include "parquet_extension.hpp"
 #include "tpch_extension.hpp"
 #include "autocomplete_extension.hpp"
+#include "httpfs_extension.hpp"
+#include "httpfs_client.hpp"
+
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
 
@@ -31,6 +35,10 @@ void ExtensionHelper::LoadAllExtensions(DuckDB &db)
 	LoadExtension(db, "tpch");
 	// The CLI's tab completion.
 	LoadExtension(db, "autocomplete");
+	// https:// and s3://, over modules/mininet. Registering it costs nothing
+	// when the network is down: the filesystems only reach the stack when a
+	// path actually names one of their schemes.
+	LoadExtension(db, "httpfs");
 }
 
 //! Named lookup, for callers that ask for an extension by string (the benchmark
@@ -47,6 +55,16 @@ ExtensionLoadResult ExtensionHelper::LoadExtension(DuckDB &db, const std::string
 		db.LoadStaticExtension<TpchExtension>();
 	} else if (extension == "autocomplete") {
 		db.LoadStaticExtension<AutocompleteExtension>();
+	} else if (extension == "httpfs") {
+		db.LoadStaticExtension<HttpfsExtension>();
+		// httpfs installs HTTPFSCurlUtil as the default HTTP backend at the end
+		// of its Load, and curl does not exist here -- its InitializeClient is
+		// the one in miniosv/http/curl_unsupported.cpp, which throws. Point the
+		// configuration back at the base HTTPFSUtil, whose InitializeClient is
+		// the mininet client. SetHTTPUtil is public API and this runs after
+		// Load, so nothing upstream has to change; without it every http:// and
+		// s3:// query fails with "the curl backend is not available".
+		DBConfig::GetConfig(*db.instance).SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
 	} else {
 		return ExtensionLoadResult::NOT_LOADED;
 	}

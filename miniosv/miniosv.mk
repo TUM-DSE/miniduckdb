@@ -114,7 +114,7 @@ $(out)/$(duckdb-dir)/tools/shell/shell.o: CXXFLAGS += -Dmain=duckdb_shell_main
 
 # The miniosv/ sources use DuckDB's headers but are ours, so they build with
 # the same include path and shim as the engine.
-$(out)/$(duckdb-miniosv)/static_extensions.o: CXXFLAGS += $(duckdb-cxxflags)
+$(out)/$(duckdb-miniosv)/static_extensions.o: CXXFLAGS += $(duckdb-cxxflags) $(httpfs-includes)
 $(out)/$(duckdb-miniosv)/benchmark_support.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/stubs/posix_stubs.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-miniosv)/fs/local_file_system.o: CXXFLAGS += $(duckdb-cxxflags)
@@ -128,3 +128,81 @@ $(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += $(duckdb-includes) \
     -include include/osv/fstream_shim.hpp -w -Wno-error
 
 # The .cpp pattern rule lives in the top-level Makefile: llama.cpp needs it too.
+
+# --- httpfs -----------------------------------------------------------------
+#
+# app/miniduckdb-httpfs is upstream duckdb-httpfs, unmodified, pinned at the
+# last commit before it started requiring HTTPClient::Options -- a virtual the
+# core in this tree does not declare. Nothing in it is patched: the HTTP client
+# is chosen by which file gets compiled, which is upstream's own mechanism
+# (httplib normally, a stub under Emscripten), so leaving those out of the list
+# below and supplying miniosv/http/mininet_client.cpp instead is all it takes.
+#
+# Left out on purpose:
+#   httpfs_httplib_client / httpfs_curl_client / httpfs_client_wasm
+#       replaced by ours; the first two want sockets and libcurl anyway.
+#   crypto.cpp
+#       OpenSSL, and only reachable through OVERRIDE_ENCRYPTION_UTILS. Leaving
+#       that undefined keeps EncryptionUtil as core's mbedtls implementation,
+#       which is already compiled in -- so SigV4 needs nothing further.
+
+httpfs-dir := app/miniduckdb-httpfs
+
+httpfs-sources := \
+    $(httpfs-dir)/src/httpfs.cpp \
+    $(httpfs-dir)/src/http_state.cpp \
+    $(httpfs-dir)/src/httpfs_connection_caching.cpp \
+    $(httpfs-dir)/src/httpfs_extension.cpp \
+    $(httpfs-dir)/src/create_secret_functions.cpp \
+    $(httpfs-dir)/src/hash_functions.cpp \
+    $(httpfs-dir)/src/hffs.cpp \
+    $(httpfs-dir)/src/s3fs.cpp \
+    $(httpfs-dir)/src/s3_multi_part_upload.cpp
+
+httpfs-objects := $(httpfs-sources:.cpp=.o)
+
+httpfs-includes := -I$(httpfs-dir)/src/include
+
+$(out)/$(httpfs-dir)/%.o: CXXFLAGS += $(duckdb-cxxflags) $(httpfs-includes)
+
+# Our client, and the C++ side of the stack it talks to.
+include modules/mininet/mininet.mk
+
+$(out)/$(duckdb-miniosv)/http/%.o: CXXFLAGS += \
+    $(duckdb-cxxflags) $(httpfs-includes)
+
+# main.cc brings the stack up, so it needs the endpoint. There is no resolver
+# in the guest, so the address is a build-time constant exactly as it is for
+# the benchmark:
+#
+#     make app=duckdb MININET_HOST=bucket.s3.eu-north-1.amazonaws.com \
+#                     MININET_ADDR=3.5.216.240
+#
+# Leave MININET_HOST empty and the image simply has no network.
+MININET_HOST ?=
+MININET_ADDR ?= 0.0.0.0
+MININET_WORKERS ?= 2
+MININET_CONNS ?= 8
+
+# Those reach the compiler through a target-specific variable, and make does
+# not rebuild an object when one changes -- it only compares timestamps. A
+# stale address does not fail, it dials the wrong host, so record them in a
+# file and depend on that.
+duckdb-net-stamp = $(out)/$(duckdb-miniosv)/mininet-config.stamp
+.PHONY: duckdb-net-phony
+$(duckdb-net-stamp): duckdb-net-phony
+	$(call very-quiet, $(makedir))
+	@v='$(MININET_HOST) $(MININET_ADDR) $(MININET_WORKERS) $(MININET_CONNS)'; \
+	 [ "$$(cat $@ 2>/dev/null)" = "$$v" ] || echo "$$v" > $@
+
+$(out)/$(duckdb-miniosv)/main.o: $(duckdb-net-stamp)
+$(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += \
+    -DMININET_HOST=\"$(MININET_HOST)\" \
+    -DMININET_ADDR=\"$(MININET_ADDR)\" \
+    -DMININET_WORKERS=$(MININET_WORKERS) \
+    -DMININET_CONNS=$(MININET_CONNS)
+
+app-objects += $(httpfs-objects)
+app-objects += $(duckdb-miniosv)/http/mininet_client.o
+app-objects += $(duckdb-miniosv)/http/curl_unsupported.o
+app-objects += $(mininet-lib-objects)

@@ -22,6 +22,7 @@
 #include <osv/bootargs.hh>
 
 #include "modules/miniext/miniext.hh"
+#include "modules/mininet/mininet.hh"
 
 #include "duckdb.hpp"
 
@@ -32,6 +33,21 @@ int duckdb_benchmark_main(int argc, char **argv);
 int duckdb_shell_main(int argc, const char **argv);
 
 namespace {
+
+// The endpoint mininet is brought up for, baked in at build time because the
+// guest has no resolver. Empty host means "no network"; see miniosv.mk.
+#ifndef MININET_HOST
+#define MININET_HOST ""
+#endif
+#ifndef MININET_ADDR
+#define MININET_ADDR "0.0.0.0"
+#endif
+#ifndef MININET_WORKERS
+#define MININET_WORKERS 2
+#endif
+#ifndef MININET_CONNS
+#define MININET_CONNS 8
+#endif
 
 // NVMe controller 1 is the data disk (run.py --emulated-nvme); 0 is the boot
 // disk. Mounting is best-effort so an image with no data disk still starts.
@@ -118,6 +134,26 @@ extern "C" void osv_app_main()
 	int rc = miniext::mount(DATA_NVME_ID, MOUNT_POINT);
 	if (rc < 0) {
 		printf("miniext: no data disk (%d); continuing without one\n", rc);
+	}
+
+	// Best-effort, like the mount above: an image with no NIC still runs
+	// everything that does not name an http:// or s3:// path. There is no
+	// resolver, so the endpoint is compiled in -- see the build variables in
+	// miniosv/miniosv.mk.
+	if (MININET_HOST[0] != '\0') {
+		mininet::config net {};
+		net.host = MININET_HOST;
+		net.address = MININET_ADDR;
+		net.tls = 1;
+		net.workers = MININET_WORKERS;
+		net.conns_per_worker = MININET_CONNS;
+		net.rx_buffer = 0;
+		int nrc = mininet::up(net);
+		if (nrc != mininet::OK) {
+			printf("mininet: %s; continuing without a network\n", mininet::strerror(nrc));
+		} else {
+			printf("mininet: serving %s\n", MININET_HOST);
+		}
 	}
 
 	std::vector<std::string> words = osv::bootargs_split(osv::bootargs());
