@@ -14,6 +14,7 @@
  */
 
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -154,6 +155,11 @@ extern "C" void osv_app_main()
 		} else {
 			printf("mininet: serving %s\n", MININET_HOST);
 		}
+		// Whether signed S3 access is possible at all comes down to this
+		// number: SigV4 refuses a request whose x-amz-date is more than 15
+		// minutes out. TLS working proves far less than it looks, because
+		// certificate validity windows are months wide.
+		printf("clock: unix %llu\n", (unsigned long long)time(nullptr));
 	}
 
 	std::vector<std::string> words = osv::bootargs_split(osv::bootargs());
