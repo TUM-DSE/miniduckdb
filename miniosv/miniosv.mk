@@ -1,18 +1,27 @@
-# DuckDB as the miniOSv application. Included by app/Makefile for `make app=duckdb`.
+# DuckDB as the miniOSv application. Included by the tree's Makefile, which the
+# kernel's top-level Makefile includes in turn.
 #
 # The engine is compiled from its real source tree, file by file, rather than
 # through upstream's amalgamation: it parallelises, rebuilds incrementally, and
 # errors name the file they came from. miniosv/sources.mk holds the generated
 # list; regenerate it with miniosv/gen-sources.py after a version bump.
 #
-# Nothing under app/miniduckdb outside miniosv/ is modified -- the DuckDB tree
-# is upstream v1.5.5 unchanged. Everything miniOSv needs is a shim here, put on
-# the include path ahead of the real headers or force-included.
+# Nothing outside miniosv/ is modified -- the DuckDB tree is upstream v1.5.5
+# unchanged. Everything miniOSv needs is a shim here, put on the include path
+# ahead of the real headers or force-included.
 
-include app/miniduckdb/miniosv/sources.mk
+# Where this tree sits under the miniOSv root, derived from this file's own
+# path: app/miniduckdb when built in place, app when staged there. Must come
+# before any include, which would move MAKEFILE_LIST's last word.
+duckdb-miniosv := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
+duckdb-dir     := $(patsubst %/,%,$(dir $(duckdb-miniosv)))
 
-duckdb-dir     := app/miniduckdb
-duckdb-miniosv := $(duckdb-dir)/miniosv
+include $(duckdb-miniosv)/sources.mk
+
+# sources.mk names paths relative to this tree; the build needs them relative
+# to the miniOSv root.
+duckdb-include-dirs := $(addprefix $(duckdb-dir)/,$(duckdb-include-dirs))
+duckdb-sources      := $(addprefix $(duckdb-dir)/,$(duckdb-sources))
 
 # --- flags ------------------------------------------------------------------
 
@@ -86,8 +95,8 @@ app-objects += $(duckdb-miniosv)/stubs/posix_stubs.o
 app-objects += $(duckdb-miniosv)/fs/local_file_system.o
 
 # Apply the flags to every DuckDB object. Target-specific variables cover the
-# whole app/miniduckdb subtree, so this reaches the generated file list without
-# naming each file.
+# whole subtree, so this reaches the generated file list without naming each
+# file.
 $(out)/$(duckdb-dir)/%.o: CXXFLAGS += $(duckdb-cxxflags)
 $(out)/$(duckdb-dir)/%.o: CFLAGS   += $(duckdb-cflags)
 $(out)/$(duckdb-dir)/extension/tpch/%.o: CXXFLAGS += $(duckdb-tpch-flags)
