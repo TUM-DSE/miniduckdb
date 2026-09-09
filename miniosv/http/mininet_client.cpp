@@ -81,9 +81,9 @@ idx_t RangeLength(const HTTPHeaders &headers) {
 	}
 }
 
-//! Request line, headers, blank line. `Connection: close` because mininet does
-//! not reuse connections yet; when it does, this goes and the response length
-//! stops being FIN-delimited.
+//! Request line, headers, blank line. No explicit `Connection:` header --
+//! HTTP/1.1 defaults to keep-alive, and mininet reuses the socket for the
+//! next request on this slot as long as the peer leaves it Established.
 string RenderHead(const char *method, const string &path, const string &host, const HTTPHeaders &headers,
                   const HTTPParams &params) {
 	string out = string(method) + " " + path + " HTTP/1.1\r\n";
@@ -100,7 +100,7 @@ string RenderHead(const char *method, const string &path, const string &host, co
 	for (auto &h : params.extra_headers) {
 		out += h.first + ": " + h.second + "\r\n";
 	}
-	out += "Connection: close\r\n\r\n";
+	out += "\r\n";
 	return out;
 }
 

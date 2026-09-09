@@ -325,6 +325,10 @@ int run_tpch(int argc, char **argv)
 	printf("\nTPCH SUMMARY: ok=%d total=%zu ms=%.1f checked=%d matched=%d\n",
 	       ok, queries.size(), total_ms, checked, matched);
 
+	mininet::conn_stats cs = mininet::stats();
+	printf("CONN STATS: requests=%llu reused=%llu\n",
+	       (unsigned long long)cs.requests_served, (unsigned long long)cs.requests_reused);
+
 	bool complete = ok == (int)queries.size() && matched == checked;
 	printf("%s: tpch sf=%s ok=%d/%zu\n", complete ? "COMPLETE" : "INCOMPLETE",
 	       sf_str, ok, queries.size());
