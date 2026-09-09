@@ -183,6 +183,11 @@ MININET_HOST ?=
 MININET_ADDR ?= 0.0.0.0
 MININET_WORKERS ?= 2
 MININET_CONNS ?= 8
+# 0 dials plain HTTP on port 80 instead of TLS on 443 -- isolates the network
+# stack's cost from the TLS handshake, the way BENCH_SCHEME=http does for
+# apps/bench/smoltcp-s3. The bucket policy needs no aws:SecureTransport deny
+# for this to work; the one bucket_policy.py writes doesn't add one.
+MININET_TLS ?= 1
 
 # Those reach the compiler through a target-specific variable, and make does
 # not rebuild an object when one changes -- it only compares timestamps. A
@@ -192,7 +197,7 @@ duckdb-net-stamp = $(out)/$(duckdb-miniosv)/mininet-config.stamp
 .PHONY: duckdb-net-phony
 $(duckdb-net-stamp): duckdb-net-phony
 	$(call very-quiet, $(makedir))
-	@v='$(MININET_HOST) $(MININET_ADDR) $(MININET_WORKERS) $(MININET_CONNS)'; \
+	@v='$(MININET_HOST) $(MININET_ADDR) $(MININET_WORKERS) $(MININET_CONNS) $(MININET_TLS)'; \
 	 [ "$$(cat $@ 2>/dev/null)" = "$$v" ] || echo "$$v" > $@
 
 $(out)/$(duckdb-miniosv)/main.o: $(duckdb-net-stamp)
@@ -200,7 +205,8 @@ $(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += \
     -DMININET_HOST=\"$(MININET_HOST)\" \
     -DMININET_ADDR=\"$(MININET_ADDR)\" \
     -DMININET_WORKERS=$(MININET_WORKERS) \
-    -DMININET_CONNS=$(MININET_CONNS)
+    -DMININET_CONNS=$(MININET_CONNS) \
+    -DMININET_TLS=$(MININET_TLS)
 
 app-objects += $(httpfs-objects)
 app-objects += $(duckdb-miniosv)/http/mininet_client.o

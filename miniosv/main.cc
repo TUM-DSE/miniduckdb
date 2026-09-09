@@ -52,6 +52,9 @@ namespace {
 #ifndef MININET_CONNS
 #define MININET_CONNS 8
 #endif
+#ifndef MININET_TLS
+#define MININET_TLS 1
+#endif
 
 // NVMe controller 1 is the data disk (run.py --emulated-nvme); 0 is the boot
 // disk. Mounting is best-effort so an image with no data disk still starts.
@@ -207,8 +210,9 @@ bool answers_match(const std::string &want, const std::string &got)
 }
 
 // TPC-H over the S3 bucket mininet is pointed at, read as views over
-// read_parquet('https://...'), instead of the local-disk benchmark runner
-// mk-tpch.sh feeds (that one exercises miniext, not the network). The query
+// read_parquet(), instead of the local-disk benchmark runner mk-tpch.sh
+// feeds (that one exercises miniext, not the network). Scheme (http/https)
+// follows MININET_TLS -- both dial the same bucket. The query
 // text comes from the tpch extension's own PRAGMA -- no local query files to
 // ship -- and so do the canned answers, when the scale factor has one
 // (0.01, 0.1, 1; see extension/tpch/dbgen/dbgen.cpp).
@@ -251,8 +255,9 @@ int run_tpch(int argc, char **argv)
 		snprintf(sf_str, sizeof(sf_str), "%g", sf);
 	}
 
-	printf("tpch: sf=%s, %zu quer%s, bucket %s\n", sf_str, queries.size(),
-	       queries.size() == 1 ? "y" : "ies", MININET_HOST);
+	const char *scheme = MININET_TLS ? "https" : "http";
+	printf("tpch: sf=%s, %zu quer%s, bucket %s (%s)\n", sf_str, queries.size(),
+	       queries.size() == 1 ? "y" : "ies", MININET_HOST, scheme);
 
 	duckdb::DuckDB db(nullptr);
 	duckdb::Connection con(db);
@@ -263,8 +268,8 @@ int run_tpch(int argc, char **argv)
 		char sql[512];
 		snprintf(sql, sizeof(sql),
 		         "CREATE VIEW %s AS SELECT * FROM "
-		         "read_parquet('https://%s/tpch/sf%s/%s.parquet');",
-		         t, MININET_HOST, sf_str, t);
+		         "read_parquet('%s://%s/tpch/sf%s/%s.parquet');",
+		         t, scheme, MININET_HOST, sf_str, t);
 		auto r = con.Query(sql);
 		if (r->HasError()) {
 			printf("FAIL: view %s: %s\n", t, r->GetError().c_str());
@@ -371,7 +376,7 @@ extern "C" void osv_app_main()
 		mininet::config net {};
 		net.host = MININET_HOST;
 		net.address = MININET_ADDR;
-		net.tls = 1;
+		net.tls = MININET_TLS;
 		net.workers = MININET_WORKERS;
 		net.conns_per_worker = MININET_CONNS;
 		net.rx_buffer = 0;
