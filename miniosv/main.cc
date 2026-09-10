@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/mem/heap/histogram.hh"
@@ -223,10 +224,29 @@ bool answers_match(const std::string &want, const std::string &got)
 int run_tpch(int argc, char **argv)
 {
 	double sf = 1.0;
+	// 0 leaves DuckDB's own default: one thread per CPU. Worth being able to
+	// set, because mininet's workers poll without yielding, so on a small
+	// instance the workers and DuckDB's threads together can outnumber the
+	// cores.
+	int threads = 0;
+	// DuckDB sizes max_memory from sysconf(_SC_PHYS_PAGES), which reports the
+	// whole machine. A fixed cap on both arms is a better comparison than each
+	// side guessing from its own view of it. Null leaves DuckDB's default.
+	const char *memlimit = nullptr;
 	std::vector<int> queries;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--sf") == 0 && i + 1 < argc) {
 			sf = atof(argv[++i]);
+		} else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+			threads = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--memlimit") == 0 && i + 1 < argc) {
+			memlimit = argv[++i];
+		} else if (argv[i][0] == '-') {
+			// Refuse rather than fall through to the query parse below, where
+			// atoi() would read "--memlimit 2GB" as a request to run Q02 and
+			// the run would look ordinary while answering a different question.
+			printf("FAIL: unknown option '%s'\n", argv[i]);
+			return 1;
 		} else {
 			int n = atoi(argv[i]);
 			if (n >= 1 && n <= 22) {
@@ -261,6 +281,36 @@ int run_tpch(int argc, char **argv)
 
 	duckdb::DuckDB db(nullptr);
 	duckdb::Connection con(db);
+
+	if (threads > 0) {
+		char tsql[64];
+		snprintf(tsql, sizeof(tsql), "SET threads=%d", threads);
+		auto tr = con.Query(tsql);
+		if (tr->HasError()) {
+			printf("FAIL: %s: %s\n", tsql, tr->GetError().c_str());
+			return 1;
+		}
+	}
+	if (memlimit) {
+		char msql[64];
+		snprintf(msql, sizeof(msql), "SET memory_limit='%s'", memlimit);
+		auto mr = con.Query(msql);
+		if (mr->HasError()) {
+			printf("FAIL: %s: %s\n", msql, mr->GetError().c_str());
+			return 1;
+		}
+	}
+	// What DuckDB settled on, not what was asked for: the reason to print it
+	// is to catch the guest's idea of the machine disagreeing with DuckDB's.
+	{
+		auto mr = con.Query("SELECT current_setting('memory_limit')");
+		if (!mr->HasError() && mr->RowCount() == 1) {
+			printf("memory: limit=%s\n", mr->GetValue(0, 0).ToString().c_str());
+		}
+	}
+	printf("cpus: hw_concurrency=%u duckdb_threads=%llu workers=%d conns=%d\n",
+	       std::thread::hardware_concurrency(), (unsigned long long)db.NumberOfThreads(),
+	       MININET_WORKERS, MININET_CONNS);
 
 	static const char *tables[] = {"customer", "lineitem", "nation",  "orders",
 	                                "part",     "partsupp", "region", "supplier"};
