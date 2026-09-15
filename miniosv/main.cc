@@ -220,6 +220,55 @@ bool answers_match(const std::string &want, const std::string &got)
 	return true;
 }
 
+// How many cpus actually did work, from the only side that cannot be argued
+// with: each cpu's idle thread. A cpu whose idle thread consumed none of the
+// wall clock was busy the whole step; one whose idle thread consumed all of it
+// did nothing.
+//
+// This is the measurement the ladder was missing. `par_t1` -> `par_tall`
+// reports a 1.40x speedup here against Linux's 11.6x on the same 32 vCPUs, so
+// either the threads are not on 32 cpus or the cpus are not doing the work,
+// and idle time tells those apart.
+struct idle_sample {
+	std::vector<uint64_t> ns;
+};
+
+idle_sample sample_idle()
+{
+	idle_sample out;
+	out.ns.reserve(sched::cpus.size());
+	for (auto *c : sched::cpus) {
+		out.ns.push_back(c->idle_thread
+		                     ? (uint64_t)c->idle_thread->thread_clock().count()
+		                     : 0);
+	}
+	return out;
+}
+
+// "busy" is a cpu that spent under half the step idle. Half rather than some
+// small fraction because the question is how many cpus carried the work, not
+// how many were touched by it.
+void report_idle(const char *name, const idle_sample &before,
+                 const idle_sample &after, double wall_ms)
+{
+	unsigned busy = 0;
+	double idle_ms_total = 0;
+	for (size_t i = 0; i < before.ns.size() && i < after.ns.size(); i++) {
+		double idle_ms = (double)(after.ns[i] - before.ns[i]) / 1e6;
+		idle_ms_total += idle_ms;
+		if (idle_ms < wall_ms / 2) {
+			busy++;
+		}
+	}
+	size_t n = before.ns.size();
+	// Wall time times cpu count, less the idle, is the cpu time the step
+	// actually consumed -- so divided by wall time it is the parallelism
+	// achieved, on the same footing as the Linux arm's user_ms/real.
+	double cpu_ms = wall_ms * (double)n - idle_ms_total;
+	printf("CPUS: name=%s busy=%u of %zu parallelism=%.2f idle_ms=%.0f\n", name,
+	       busy, n, wall_ms > 0 ? cpu_ms / wall_ms : 0.0, idle_ms_total);
+}
+
 // Broadcast TLB invalidation, as the workload actually paid for it.
 //
 // Every free of a mapping takes one global mutex and then blocks until all 31
@@ -479,9 +528,11 @@ int run_tpch(int argc, char **argv)
 
 		uint64_t net0 = duckdb::MininetWaitNs();
 		uint64_t calls0 = duckdb::MininetWaitCalls();
+		auto idle0 = sample_idle();
 		auto t0 = std::chrono::steady_clock::now();
 		auto r = con.Query(pragma);
 		auto t1 = std::chrono::steady_clock::now();
+		auto idle1 = sample_idle();
 		double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 		double net_ms = (duckdb::MininetWaitNs() - net0) / 1e6;
 		uint64_t net_calls = duckdb::MininetWaitCalls() - calls0;
@@ -519,6 +570,17 @@ int run_tpch(int argc, char **argv)
 
 		printf("Q%02d: %.1f ms, %llu rows, match=%s, net_ms=%.1f, net_calls=%llu\n", qn, ms,
 		       (unsigned long long)r->RowCount(), match, net_ms, (unsigned long long)net_calls);
+
+		// How many cpus the query itself used. The ladder measures this for
+		// a step with no I/O in it; here most threads are waiting on S3 most
+		// of the time, so the number to read is `parallelism` against what
+		// the same run reports as time inside HTTP -- the two together say
+		// whether the compute stage or the wire is the constraint.
+		{
+			char name[16];
+			snprintf(name, sizeof(name), "q%02d", qn);
+			report_idle(name, idle0, idle1, ms);
+		}
 
 		// After the answer check, not before: the check runs a query of its
 		// own, and tpch_answers() is local, so it adds no requests -- but
@@ -659,55 +721,6 @@ const probe_step probe_steps[] = {
 // `par_tall` mean "one thread" and "one per cpu" and a caller-supplied value
 // would make the second of those a different question -- and `RESET threads`
 // would then undo it rather than restore it.
-// How many cpus actually did work, from the only side that cannot be argued
-// with: each cpu's idle thread. A cpu whose idle thread consumed none of the
-// wall clock was busy the whole step; one whose idle thread consumed all of it
-// did nothing.
-//
-// This is the measurement the ladder was missing. `par_t1` -> `par_tall`
-// reports a 1.40x speedup here against Linux's 11.6x on the same 32 vCPUs, so
-// either the threads are not on 32 cpus or the cpus are not doing the work,
-// and idle time tells those apart.
-struct idle_sample {
-	std::vector<uint64_t> ns;
-};
-
-idle_sample sample_idle()
-{
-	idle_sample out;
-	out.ns.reserve(sched::cpus.size());
-	for (auto *c : sched::cpus) {
-		out.ns.push_back(c->idle_thread
-		                     ? (uint64_t)c->idle_thread->thread_clock().count()
-		                     : 0);
-	}
-	return out;
-}
-
-// "busy" is a cpu that spent under half the step idle. Half rather than some
-// small fraction because the question is how many cpus carried the work, not
-// how many were touched by it.
-void report_idle(const char *name, const idle_sample &before,
-                 const idle_sample &after, double wall_ms)
-{
-	unsigned busy = 0;
-	double idle_ms_total = 0;
-	for (size_t i = 0; i < before.ns.size() && i < after.ns.size(); i++) {
-		double idle_ms = (double)(after.ns[i] - before.ns[i]) / 1e6;
-		idle_ms_total += idle_ms;
-		if (idle_ms < wall_ms / 2) {
-			busy++;
-		}
-	}
-	size_t n = before.ns.size();
-	// Wall time times cpu count, less the idle, is the cpu time the step
-	// actually consumed -- so divided by wall time it is the parallelism
-	// achieved, on the same footing as the Linux arm's user_ms/real.
-	double cpu_ms = wall_ms * (double)n - idle_ms_total;
-	printf("CPUS: name=%s busy=%u of %zu parallelism=%.2f idle_ms=%.0f\n", name,
-	       busy, n, wall_ms > 0 ? cpu_ms / wall_ms : 0.0, idle_ms_total);
-}
-
 int run_cpuprobe(int argc, char **argv)
 {
 	for (int i = 1; i < argc; i++) {
