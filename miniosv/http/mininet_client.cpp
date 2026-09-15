@@ -33,7 +33,26 @@
 
 #include "modules/mininet/mininet.hh"
 
+#include <atomic>
+#include <chrono>
+
 namespace duckdb {
+
+// Profiling only: total wall time DuckDB's query threads spent blocked
+// inside mininet::get(), and how many calls that covers. Read from
+// main.cc's run_tpch to split a query's time into network-wait vs.
+// everything else (parse, decode, join, aggregate). Relaxed is enough --
+// these are read back once per query, after the query itself has
+// synchronized with its worker threads.
+std::atomic<uint64_t> g_mininet_wait_ns {0};
+std::atomic<uint64_t> g_mininet_wait_calls {0};
+
+uint64_t MininetWaitNs() {
+	return g_mininet_wait_ns.load(std::memory_order_relaxed);
+}
+uint64_t MininetWaitCalls() {
+	return g_mininet_wait_calls.load(std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -164,12 +183,33 @@ public:
 		body.resize(want);
 
 		mininet::response r {};
+		auto t0 = std::chrono::steady_clock::now();
 		int rc = mininet::get(head.c_str(), head.size(), &body[0], body.size(), &r);
+		auto t1 = std::chrono::steady_clock::now();
+		g_mininet_wait_ns.fetch_add(
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
+		    std::memory_order_relaxed);
+		g_mininet_wait_calls.fetch_add(1, std::memory_order_relaxed);
 		if (rc != mininet::OK) {
 			return Failed(rc, "mininet: GET " + info.path);
 		}
 
 		auto response = ToResponse(r);
+
+		// Diagnostic for the Q10-at-sf=10 thrift failure: a range read that
+		// comes back short but successful leaves the tail of httpfs's buffer
+		// holding whatever was there before, which reaches the parquet reader
+		// as plausible-looking garbage. Print only the anomalies -- the serial
+		// console is slow enough that logging every request would change the
+		// timing being investigated.
+		if (static_cast<idx_t>(r.bytes) != want || r.status != 206) {
+			printf("ODD READ: %s range=%s want=%llu got=%llu status=%u cl=%llu\n",
+			       info.path.c_str(),
+			       info.headers.HasHeader("Range") ? info.headers.GetHeaderValue("Range").c_str() : "-",
+			       (unsigned long long)want, (unsigned long long)r.bytes, r.status,
+			       (unsigned long long)r.content_length);
+		}
+
 		if (static_cast<int>(response->status) >= 400) {
 			// An error body is small and is the useful part; hand it over as
 			// the body rather than through the content handler.
