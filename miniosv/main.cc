@@ -47,8 +47,9 @@ namespace {
 #ifndef MININET_ADDR
 #define MININET_ADDR "0.0.0.0"
 #endif
+// 0 lets mininet size the worker count to the machine; see mininet.hh.
 #ifndef MININET_WORKERS
-#define MININET_WORKERS 2
+#define MININET_WORKERS 0
 #endif
 #ifndef MININET_CONNS
 #define MININET_CONNS 8
@@ -308,9 +309,10 @@ int run_tpch(int argc, char **argv)
 			printf("memory: limit=%s\n", mr->GetValue(0, 0).ToString().c_str());
 		}
 	}
-	printf("cpus: hw_concurrency=%u duckdb_threads=%llu workers=%d conns=%d\n",
+	printf("cpus: hw_concurrency=%u duckdb_threads=%llu workers=%s conns=%d\n",
 	       std::thread::hardware_concurrency(), (unsigned long long)db.NumberOfThreads(),
-	       MININET_WORKERS, MININET_CONNS);
+	       MININET_WORKERS ? std::to_string(MININET_WORKERS).c_str() : "auto",
+	       MININET_CONNS);
 
 	static const char *tables[] = {"customer", "lineitem", "nation",  "orders",
 	                                "part",     "partsupp", "region", "supplier"};
