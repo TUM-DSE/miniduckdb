@@ -73,6 +73,8 @@ struct executable {
 // Runs SQL against a real on-disk database through MiniextFileSystem. This is
 // the scaffolding the benchmark runner and the CLI plug into once their
 // LocalFileSystem dependency is settled; see PLAN_duckdb.md.
+static std::vector<uint64_t> sample_idle();
+
 int run_sql(int argc, char **argv)
 {
 	const char *database = nullptr;
@@ -88,6 +90,9 @@ int run_sql(int argc, char **argv)
 	// No file_system override: DuckDB's default is
 	// VirtualFileSystem(FileSystem::CreateLocal()), and CreateLocal() now
 	// returns the miniext-backed LocalFileSystem.
+	printf("memory: phys=%.1f GiB free=%.1f GiB\n",
+	       (double)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30),
+	       (double)sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30));
 	duckdb::DuckDB db(database);
 	duckdb::Connection con(db);
 
@@ -96,12 +101,25 @@ int run_sql(int argc, char **argv)
 	}
 	for (const char *sql : statements) {
 		printf("\n> %s\n", sql);
+		uint64_t epoch0 = mem::mapping::flush_epoch();
+		auto idle0 = sample_idle();
+		auto t0 = std::chrono::steady_clock::now();
 		auto result = con.Query(sql);
+		double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		auto idle1 = sample_idle();
+		double idle_ms = 0;
+		for (size_t i = 0; i < idle0.size(); i++) {
+			idle_ms += (double)(idle1[i] - idle0[i]) / 1e6;
+		}
 		if (result->HasError()) {
 			printf("Error: %s\n", result->GetError().c_str());
 		} else {
 			printf("%s\n", result->ToString().c_str());
 		}
+		printf("SQL: %.1f ms, %llu tlb shootdowns, cpus=%.1f, free=%.2f GiB\n", ms,
+		       (unsigned long long)(mem::mapping::flush_epoch() - epoch0),
+		       ms > 0 ? (ms * idle0.size() - idle_ms) / ms : 0.0,
+		       (double)sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30));
 	}
 	return 0;
 }
@@ -313,6 +331,7 @@ int run_tpch(int argc, char **argv)
 	double sf = 1.0;
 	int threads = 0;
 	const char *memlimit = nullptr;
+	bool profile = false;
 	std::vector<int> queries;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--sf") == 0 && i + 1 < argc) {
@@ -321,6 +340,8 @@ int run_tpch(int argc, char **argv)
 			threads = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--memlimit") == 0 && i + 1 < argc) {
 			memlimit = argv[++i];
+		} else if (strcmp(argv[i], "--profile") == 0) {
+			profile = true;
 		} else if (argv[i][0] == '-') {
 			printf("FAIL: unknown option '%s'\n", argv[i]);
 			return 1;
@@ -376,6 +397,9 @@ int run_tpch(int argc, char **argv)
 			printf("FAIL: %s: %s\n", msql, mr->GetError().c_str());
 			return 1;
 		}
+	}
+	if (profile) {
+		con.Query("PRAGMA enable_profiling='query_tree'");
 	}
 	{
 		auto mr = con.Query("SELECT current_setting('memory_limit')");
@@ -448,10 +472,11 @@ int run_tpch(int argc, char **argv)
 			}
 		}
 
-		printf("Q%02d: %.1f ms, %llu rows, match=%s, net_ms=%.1f, net_calls=%llu\n", qn, ms,
-		       (unsigned long long)r->RowCount(), match,
+		printf("Q%02d: %.1f ms, %llu rows, match=%s, net_ms=%.1f, net_calls=%llu, net_active_ms=%.1f\n", qn,
+		       ms, (unsigned long long)r->RowCount(), match,
 		       (double)(net1.get_ns_total - net0.get_ns_total) / 1e6,
-		       (unsigned long long)(net1.get_calls - net0.get_calls));
+		       (unsigned long long)(net1.get_calls - net0.get_calls),
+		       (double)(net1.active_ns_total - net0.active_ns_total) / 1e6);
 		report_net(qn, ms, net0, net1, idle0, idle1);
 		printf("TLB STATS: shootdowns=%llu worker_ipis=%llu\n", (unsigned long long)(epoch1 - epoch0),
 		       (unsigned long long)(ipis1 - ipis0));
