@@ -699,6 +699,28 @@ struct probe_step {
 	"sqrt(abs(l_extendedprice)) + sqrt(abs(l_quantity)) + "                \
 	"ln(2+abs(sin(l_tax))) + sqrt(1+abs(l_discount)) > -1"
 
+// The same row work four times over, so W scales 4x while any fixed per-query
+// cost stays put. One work size cannot separate P from O in t = W/P + O; two
+// can. Kept identical to PROBE_PREDICATE_4X in instance.py.
+#define PROBE_PREDICATE_4X                                                     \
+	"SELECT count(*) FROM lineitem WHERE "                                 \
+	"ln(1+abs(sin(l_extendedprice))) + ln(1+abs(cos(l_quantity))) + "      \
+	"ln(1+abs(sin(l_discount))) + ln(1+abs(cos(l_tax))) + "                \
+	"sqrt(abs(l_extendedprice)) + sqrt(abs(l_quantity)) + "                \
+	"ln(2+abs(sin(l_tax))) + sqrt(1+abs(l_discount)) + "                   \
+	"ln(1+abs(sin(l_extendedprice))) + ln(1+abs(cos(l_quantity))) + "      \
+	"ln(1+abs(sin(l_discount))) + ln(1+abs(cos(l_tax))) + "                \
+	"sqrt(abs(l_extendedprice)) + sqrt(abs(l_quantity)) + "                \
+	"ln(2+abs(sin(l_tax))) + sqrt(1+abs(l_discount)) + "                   \
+	"ln(1+abs(sin(l_extendedprice))) + ln(1+abs(cos(l_quantity))) + "      \
+	"ln(1+abs(sin(l_discount))) + ln(1+abs(cos(l_tax))) + "                \
+	"sqrt(abs(l_extendedprice)) + sqrt(abs(l_quantity)) + "                \
+	"ln(2+abs(sin(l_tax))) + sqrt(1+abs(l_discount)) + "                   \
+	"ln(1+abs(sin(l_extendedprice))) + ln(1+abs(cos(l_quantity))) + "      \
+	"ln(1+abs(sin(l_discount))) + ln(1+abs(cos(l_tax))) + "                \
+	"sqrt(abs(l_extendedprice)) + sqrt(abs(l_quantity)) + "                \
+	"ln(2+abs(sin(l_tax))) + sqrt(1+abs(l_discount)) > -1"
+
 const probe_step probe_steps[] = {
     // First: everything below reads the tables it builds.
     {"dbgen", nullptr, "CALL dbgen(sf=1)"},
@@ -712,6 +734,8 @@ const probe_step probe_steps[] = {
     // The pair that matters. par_t1 / par_tall is the achieved speedup.
     {"par_t1", "SET threads=1", PROBE_PREDICATE},
     {"par_tall", "RESET threads", PROBE_PREDICATE},
+    {"par_t1_4x", "SET threads=1", PROBE_PREDICATE_4X},
+    {"par_tall_4x", "RESET threads", PROBE_PREDICATE_4X},
     // The queries themselves, with the parquet layer taken out.
     {"q01_local", nullptr, "PRAGMA tpch(1)"},
     {"q06_local", nullptr, "PRAGMA tpch(6)"},
