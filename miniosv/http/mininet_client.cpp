@@ -160,11 +160,12 @@ public:
 		}
 
 		const string head = RenderHead("GET", info.path, host, info.headers, info.params);
-		string body;
-		body.resize(want);
+		// Not zeroed: mininet reports how much it wrote, and a memset per
+		// ranged read is the whole cost of the call on the DuckDB thread.
+		auto body = make_unsafe_uniq_array_uninitialized<char>(want);
 
 		mininet::response r {};
-		int rc = mininet::get(head.c_str(), head.size(), &body[0], body.size(), &r);
+		int rc = mininet::get(head.c_str(), head.size(), body.get(), want, &r);
 		if (rc != mininet::OK) {
 			return Failed(rc, "mininet: GET " + info.path);
 		}
@@ -173,7 +174,7 @@ public:
 		if (static_cast<int>(response->status) >= 400) {
 			// An error body is small and is the useful part; hand it over as
 			// the body rather than through the content handler.
-			response->body = body.substr(0, static_cast<size_t>(r.bytes));
+			response->body = string(body.get(), static_cast<size_t>(r.bytes));
 			if (info.response_handler) {
 				info.response_handler(*response);
 			}
@@ -183,9 +184,9 @@ public:
 			return response;
 		}
 		if (info.content_handler && r.bytes > 0) {
-			info.content_handler(const_data_ptr_cast(body.data()), static_cast<idx_t>(r.bytes));
+			info.content_handler(const_data_ptr_cast(body.get()), static_cast<idx_t>(r.bytes));
 		} else {
-			response->body = body.substr(0, static_cast<size_t>(r.bytes));
+			response->body = string(body.get(), static_cast<size_t>(r.bytes));
 		}
 		return response;
 	}

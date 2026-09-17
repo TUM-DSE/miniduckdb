@@ -29,6 +29,7 @@
 #include "modules/miniext/miniext.hh"
 #include "modules/mininet/mininet.hh"
 #include <osv/sched.hh>
+#include <osv/mem/mapping.hh>
 
 #include "duckdb.hpp"
 
@@ -221,6 +222,18 @@ static std::vector<uint64_t> sample_idle()
 	return ns;
 }
 
+// Threads that live on a reserved cpu besides its worker, with cpu time.
+static uint64_t worker_ipis()
+{
+	uint64_t n = 0;
+	for (auto *c : sched::cpus) {
+		if (c->reserved.load()) {
+			n += c->tlb_ipis.load();
+		}
+	}
+	return n;
+}
+
 static uint64_t avg(uint64_t total, uint64_t n)
 {
 	return n ? total / n : 0;
@@ -251,14 +264,17 @@ static void report_net(int qn, double wall_ms, const mininet::conn_stats &a,
 	       (unsigned long long)(b.poll_active_iters - a.poll_active_iters),
 	       (double)(b.poll_work_ns - a.poll_work_ns) / 1e6, (unsigned long long)b.poll_busy_ns_max / 1000,
 	       (unsigned long long)b.poll_loop_ns_max / 1000);
+	printf("STALL STATS: iface_us_max=%llu steps_us_max=%llu rx_pkts_max=%llu tx_pkts_max=%llu\n",
+	       (unsigned long long)b.iface_ns_max / 1000, (unsigned long long)b.steps_ns_max / 1000,
+	       (unsigned long long)b.rx_pkts_max, (unsigned long long)b.tx_pkts_max);
 	uint64_t wakes = b.wake_n - a.wake_n;
 	printf("WAKE STATS: n=%llu ns_avg=%llu us_max=%.1f ms_total=%.1f\n", (unsigned long long)wakes,
 	       (unsigned long long)avg(b.wake_ns_total - a.wake_ns_total, wakes), (double)b.wake_ns_max / 1e3,
 	       (double)(b.wake_ns_total - a.wake_ns_total) / 1e6);
 	printf("SETUP STATS: conns=%llu failed=%llu syn_retries=0 setup_us_avg=%llu setup_us_max=%llu dial_us_avg=%llu\n",
 	       (unsigned long long)(b.conns_established - a.conns_established),
-	       (unsigned long long)(b.conns_failed - a.conns_failed), (unsigned long long)b.setup_us_avg,
-	       (unsigned long long)b.setup_us_max, (unsigned long long)b.dial_us_avg);
+	       (unsigned long long)(b.conns_failed - a.conns_failed), (unsigned long long)b.setup.us_avg,
+	       (unsigned long long)b.setup.us_max, (unsigned long long)b.dial.us_avg);
 	printf("BUF STATS: retried=%llu\n", (unsigned long long)(b.requests_retried - a.requests_retried));
 	printf("DROP STATS: imissed=%llu ierrors=%llu rx_nombuf=%llu misrouted=%llu tx_alloc_fail=%llu "
 	       "tx_burst_fail=%llu ipackets=%llu ibytes=%llu\n",
@@ -394,11 +410,13 @@ int run_tpch(int argc, char **argv)
 		snprintf(pragma, sizeof(pragma), "PRAGMA tpch(%d)", qn);
 
 		auto net0 = mininet::stats();
+		uint64_t epoch0 = mem::mapping::flush_epoch(), ipis0 = worker_ipis();
 		auto idle0 = sample_idle();
 		auto t0 = std::chrono::steady_clock::now();
 		auto r = con.Query(pragma);
 		auto t1 = std::chrono::steady_clock::now();
 		auto idle1 = sample_idle();
+		uint64_t epoch1 = mem::mapping::flush_epoch(), ipis1 = worker_ipis();
 		auto net1 = mininet::stats();
 		double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 		total_ms += ms;
@@ -435,6 +453,8 @@ int run_tpch(int argc, char **argv)
 		       (double)(net1.get_ns_total - net0.get_ns_total) / 1e6,
 		       (unsigned long long)(net1.get_calls - net0.get_calls));
 		report_net(qn, ms, net0, net1, idle0, idle1);
+		printf("TLB STATS: shootdowns=%llu worker_ipis=%llu\n", (unsigned long long)(epoch1 - epoch0),
+		       (unsigned long long)(ipis1 - ipis0));
 	}
 
 	printf("\nTPCH SUMMARY: ok=%d total=%zu ms=%.1f checked=%d matched=%d\n",
