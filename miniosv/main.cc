@@ -242,14 +242,15 @@ static void report_net(int qn, double wall_ms, const mininet::conn_stats &a,
 	       (unsigned long long)avg(b.xfer_ns_total - a.xfer_ns_total, b.xfer_n - a.xfer_n) / 1000);
 	uint64_t iters = b.poll_iters - a.poll_iters;
 	printf("POLL STATS: iters=%llu gap_us_avg=%.2f gap_us_max=%llu gaps_over_1ms=%llu busy_ms=%.0f "
-	       "active=%llu work_ms=%.0f\n",
+	       "active=%llu work_ms=%.0f busy_us_max=%llu loop_us_max=%llu\n",
 	       (unsigned long long)iters,
 	       iters ? (double)(b.poll_gap_ns_total - a.poll_gap_ns_total) / iters / 1e3 : 0.0,
 	       (unsigned long long)b.poll_gap_ns_max / 1000,
 	       (unsigned long long)(b.poll_gaps_over_1ms - a.poll_gaps_over_1ms),
 	       (double)(b.poll_busy_ns - a.poll_busy_ns) / 1e6,
 	       (unsigned long long)(b.poll_active_iters - a.poll_active_iters),
-	       (double)(b.poll_work_ns - a.poll_work_ns) / 1e6);
+	       (double)(b.poll_work_ns - a.poll_work_ns) / 1e6, (unsigned long long)b.poll_busy_ns_max / 1000,
+	       (unsigned long long)b.poll_loop_ns_max / 1000);
 	uint64_t wakes = b.wake_n - a.wake_n;
 	printf("WAKE STATS: n=%llu ns_avg=%llu us_max=%.1f ms_total=%.1f\n", (unsigned long long)wakes,
 	       (unsigned long long)avg(b.wake_ns_total - a.wake_ns_total, wakes), (double)b.wake_ns_max / 1e3,
