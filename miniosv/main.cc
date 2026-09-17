@@ -263,7 +263,8 @@ int run_tpch(int argc, char **argv)
 
 	if (MININET_HOST[0] == '\0') {
 		printf("FAIL: tpch needs a network -- build with "
-		       "make app=duckdb MININET_HOST=<bucket>.s3.<region>.amazonaws.com\n");
+		       "just build apps/bench/duckdb-tpch "
+		       "MININET_HOST=<bucket>.s3.<region>.amazonaws.com\n");
 		return 1;
 	}
 
