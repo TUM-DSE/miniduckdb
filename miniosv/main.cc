@@ -28,6 +28,7 @@
 
 #include "modules/miniext/miniext.hh"
 #include "modules/mininet/mininet.hh"
+#include <osv/sched.hh>
 
 #include "duckdb.hpp"
 
@@ -211,13 +212,81 @@ bool answers_match(const std::string &want, const std::string &got)
 	return true;
 }
 
-// TPC-H over the S3 bucket mininet is pointed at, read as views over
-// read_parquet(), instead of the local-disk benchmark runner mk-tpch.sh
-// feeds (that one exercises miniext, not the network). Scheme (http/https)
-// follows MININET_TLS -- both dial the same bucket. The query
-// text comes from the tpch extension's own PRAGMA -- no local query files to
-// ship -- and so do the canned answers, when the scale factor has one
-// (0.01, 0.1, 1; see extension/tpch/dbgen/dbgen.cpp).
+static std::vector<uint64_t> sample_idle()
+{
+	std::vector<uint64_t> ns;
+	for (auto *c : sched::cpus) {
+		ns.push_back(c->idle_thread ? (uint64_t)c->idle_thread->thread_clock().count() : 0);
+	}
+	return ns;
+}
+
+static uint64_t avg(uint64_t total, uint64_t n)
+{
+	return n ? total / n : 0;
+}
+
+static void report_net(int qn, double wall_ms, const mininet::conn_stats &a,
+                       const mininet::conn_stats &b, const std::vector<uint64_t> &idle0,
+                       const std::vector<uint64_t> &idle1)
+{
+	uint64_t done = b.requests_done - a.requests_done;
+	uint64_t wire_ns = b.wire_ns_total - a.wire_ns_total;
+	uint64_t bytes = b.body_bytes - a.body_bytes;
+	printf("REQ STATS: queue_us_avg=%llu wire_us_avg=%llu bytes=%llu mb_per_s=%.1f n=%llu\n",
+	       (unsigned long long)avg(b.queue_ns_total - a.queue_ns_total, done) / 1000,
+	       (unsigned long long)avg(wire_ns, done) / 1000, (unsigned long long)bytes,
+	       wire_ns ? (double)bytes / ((double)wire_ns / 1e3) : 0.0, (unsigned long long)done);
+	printf("LATENCY STATS: ttfb_us_avg=%llu xfer_us_avg=%llu\n",
+	       (unsigned long long)avg(b.ttfb_ns_total - a.ttfb_ns_total, b.ttfb_n - a.ttfb_n) / 1000,
+	       (unsigned long long)avg(b.xfer_ns_total - a.xfer_ns_total, b.xfer_n - a.xfer_n) / 1000);
+	uint64_t iters = b.poll_iters - a.poll_iters;
+	printf("POLL STATS: iters=%llu gap_us_avg=%.2f gap_us_max=%llu gaps_over_1ms=%llu busy_ms=%.0f "
+	       "active=%llu work_ms=%.0f\n",
+	       (unsigned long long)iters,
+	       iters ? (double)(b.poll_gap_ns_total - a.poll_gap_ns_total) / iters / 1e3 : 0.0,
+	       (unsigned long long)b.poll_gap_ns_max / 1000,
+	       (unsigned long long)(b.poll_gaps_over_1ms - a.poll_gaps_over_1ms),
+	       (double)(b.poll_busy_ns - a.poll_busy_ns) / 1e6,
+	       (unsigned long long)(b.poll_active_iters - a.poll_active_iters),
+	       (double)(b.poll_work_ns - a.poll_work_ns) / 1e6);
+	uint64_t wakes = b.wake_n - a.wake_n;
+	printf("WAKE STATS: n=%llu ns_avg=%llu us_max=%.1f ms_total=%.1f\n", (unsigned long long)wakes,
+	       (unsigned long long)avg(b.wake_ns_total - a.wake_ns_total, wakes), (double)b.wake_ns_max / 1e3,
+	       (double)(b.wake_ns_total - a.wake_ns_total) / 1e6);
+	printf("SETUP STATS: conns=%llu failed=%llu syn_retries=0 setup_us_avg=%llu setup_us_max=%llu dial_us_avg=%llu\n",
+	       (unsigned long long)(b.conns_established - a.conns_established),
+	       (unsigned long long)(b.conns_failed - a.conns_failed), (unsigned long long)b.setup_us_avg,
+	       (unsigned long long)b.setup_us_max, (unsigned long long)b.dial_us_avg);
+	printf("BUF STATS: retried=%llu\n", (unsigned long long)(b.requests_retried - a.requests_retried));
+	printf("DROP STATS: imissed=%llu ierrors=%llu rx_nombuf=%llu misrouted=%llu tx_alloc_fail=%llu "
+	       "tx_burst_fail=%llu ipackets=%llu ibytes=%llu\n",
+	       (unsigned long long)(b.nic_imissed - a.nic_imissed),
+	       (unsigned long long)(b.nic_ierrors - a.nic_ierrors),
+	       (unsigned long long)(b.nic_rx_nombuf - a.nic_rx_nombuf),
+	       (unsigned long long)(b.misrouted_drops - a.misrouted_drops),
+	       (unsigned long long)(b.tx_alloc_fail - a.tx_alloc_fail),
+	       (unsigned long long)(b.tx_burst_fail - a.tx_burst_fail),
+	       (unsigned long long)(b.nic_ipackets - a.nic_ipackets),
+	       (unsigned long long)(b.nic_ibytes - a.nic_ibytes));
+
+	unsigned busy = 0;
+	double idle_ms_total = 0;
+	for (size_t i = 0; i < idle0.size() && i < idle1.size(); i++) {
+		double idle_ms = (double)(idle1[i] - idle0[i]) / 1e6;
+		idle_ms_total += idle_ms;
+		if (idle_ms < wall_ms / 2) {
+			busy++;
+		}
+	}
+	size_t n = idle0.size();
+	double cpu_ms = wall_ms * (double)n - idle_ms_total;
+	printf("CPUS: name=q%02d busy=%u of %zu parallelism=%.2f idle_ms=%.0f\n", qn, busy, n,
+	       wall_ms > 0 ? cpu_ms / wall_ms : 0.0, idle_ms_total);
+}
+
+// TPC-H over the S3 bucket mininet is pointed at, as views over read_parquet();
+// query text and canned answers (sf 0.01/0.1/1) come from the tpch extension.
 //
 //     tpch --sf 1 6          run Q06 at sf=1
 //     tpch --sf 1 1 6 10     run Q01, Q06, Q10 at sf=1
@@ -225,14 +294,7 @@ bool answers_match(const std::string &want, const std::string &got)
 int run_tpch(int argc, char **argv)
 {
 	double sf = 1.0;
-	// 0 leaves DuckDB's own default: one thread per CPU. Worth being able to
-	// set, because mininet's workers poll without yielding, so on a small
-	// instance the workers and DuckDB's threads together can outnumber the
-	// cores.
 	int threads = 0;
-	// DuckDB sizes max_memory from sysconf(_SC_PHYS_PAGES), which reports the
-	// whole machine. A fixed cap on both arms is a better comparison than each
-	// side guessing from its own view of it. Null leaves DuckDB's default.
 	const char *memlimit = nullptr;
 	std::vector<int> queries;
 	for (int i = 1; i < argc; i++) {
@@ -243,9 +305,6 @@ int run_tpch(int argc, char **argv)
 		} else if (strcmp(argv[i], "--memlimit") == 0 && i + 1 < argc) {
 			memlimit = argv[++i];
 		} else if (argv[i][0] == '-') {
-			// Refuse rather than fall through to the query parse below, where
-			// atoi() would read "--memlimit 2GB" as a request to run Q02 and
-			// the run would look ordinary while answering a different question.
 			printf("FAIL: unknown option '%s'\n", argv[i]);
 			return 1;
 		} else {
@@ -268,8 +327,7 @@ int run_tpch(int argc, char **argv)
 		return 1;
 	}
 
-	// sf=1, not sf=1.000000: this has to match the tpch/sf<N>/ prefix `just
-	// setup apps/bench/duckdb-tpch` uploaded to.
+	// Must match the tpch/sf<N>/ prefix the setup uploaded to.
 	char sf_str[32];
 	if (sf == (double)(long long)sf) {
 		snprintf(sf_str, sizeof(sf_str), "%lld", (long long)sf);
@@ -302,8 +360,6 @@ int run_tpch(int argc, char **argv)
 			return 1;
 		}
 	}
-	// What DuckDB settled on, not what was asked for: the reason to print it
-	// is to catch the guest's idea of the machine disagreeing with DuckDB's.
 	{
 		auto mr = con.Query("SELECT current_setting('memory_limit')");
 		if (!mr->HasError() && mr->RowCount() == 1) {
@@ -336,9 +392,13 @@ int run_tpch(int argc, char **argv)
 		char pragma[32];
 		snprintf(pragma, sizeof(pragma), "PRAGMA tpch(%d)", qn);
 
+		auto net0 = mininet::stats();
+		auto idle0 = sample_idle();
 		auto t0 = std::chrono::steady_clock::now();
 		auto r = con.Query(pragma);
 		auto t1 = std::chrono::steady_clock::now();
+		auto idle1 = sample_idle();
+		auto net1 = mininet::stats();
 		double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 		total_ms += ms;
 
@@ -348,9 +408,7 @@ int run_tpch(int argc, char **argv)
 		}
 		ok++;
 
-		// Best-effort correctness: tpch_answers() only knows sf 0.01/0.1/1, so
-		// anything else is timed but unchecked -- same coverage mk-tpch.sh's
-		// answers/ directory has.
+		// tpch_answers() only knows sf 0.01/0.1/1; anything else is unchecked.
 		const char *match = "unchecked";
 		char asql[128];
 		snprintf(asql, sizeof(asql),
@@ -371,8 +429,11 @@ int run_tpch(int argc, char **argv)
 			}
 		}
 
-		printf("Q%02d: %.1f ms, %llu rows, match=%s\n", qn, ms,
-		       (unsigned long long)r->RowCount(), match);
+		printf("Q%02d: %.1f ms, %llu rows, match=%s, net_ms=%.1f, net_calls=%llu\n", qn, ms,
+		       (unsigned long long)r->RowCount(), match,
+		       (double)(net1.get_ns_total - net0.get_ns_total) / 1e6,
+		       (unsigned long long)(net1.get_calls - net0.get_calls));
+		report_net(qn, ms, net0, net1, idle0, idle1);
 	}
 
 	printf("\nTPCH SUMMARY: ok=%d total=%zu ms=%.1f checked=%d matched=%d\n",
