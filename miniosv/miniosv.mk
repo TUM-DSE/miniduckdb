@@ -261,6 +261,16 @@ $(out)/$(duckdb-objdir)/miniosv/main.o: CXXFLAGS += \
     -DMININET_CONNS=$(MININET_CONNS) \
     -DMININET_TLS=$(MININET_TLS)
 
+# 1 instruments the network stack -- mininet and its dependencies, the shim,
+# the ENA driver, the DuckDB client -- for llvm-cov; see scripts/cov/.
+MININET_COV ?= 0
+ifeq ($(MININET_COV),1)
+export RUSTFLAGS += -Cinstrument-coverage
+$(out)/modules/mininet/%.o $(out)/drivers/enav2/%.o $(out)/$(duckdb-objdir)/miniosv/http/%.o: \
+    CXXFLAGS += -fprofile-instr-generate -fcoverage-mapping
+app-objects += $(duckdb-objdir)/miniosv/cov.o
+endif
+
 app-objects += $(httpfs-objects)
 app-objects += $(duckdb-objdir)/miniosv/http/mininet_client.o
 app-objects += $(duckdb-objdir)/miniosv/http/curl_unsupported.o

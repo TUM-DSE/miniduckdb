@@ -495,6 +495,9 @@ int run_tpch(int argc, char **argv)
 	return complete ? 0 : 1;
 }
 
+// Defined by cov.cc in MININET_COV=1 builds, absent otherwise.
+extern "C" void mininet_cov_dump() __attribute__((weak));
+
 const executable executables[] = {
 	{"sql", run_sql},
 	{"benchmark", duckdb_benchmark_main},
@@ -584,6 +587,9 @@ extern "C" void osv_app_main()
 
 	int status = exe->run(static_cast<int>(argv.size()) - 1, argv.data());
 	printf("\n%s exited with %d\n", exe->name, status);
+	if (mininet_cov_dump) {
+		mininet_cov_dump();
+	}
 
 	// Prints the allocation histogram when the kernel was built with
 	// conf_memory_histogram=1, and nothing otherwise.
