@@ -546,7 +546,6 @@ extern "C" void osv_app_main()
 		net.tls = MININET_TLS;
 		net.workers = MININET_WORKERS;
 		net.conns_per_worker = MININET_CONNS;
-		net.rx_buffer = 0;
 		int nrc = mininet::up(net);
 		if (nrc != mininet::OK) {
 			printf("mininet: %s; continuing without a network\n", mininet::strerror(nrc));
