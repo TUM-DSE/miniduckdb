@@ -22,6 +22,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <atomic>
 
 #include "core/mem/heap/histogram.hh"
 #include <osv/bootargs.hh>
@@ -30,6 +31,12 @@
 #include "modules/mininet/mininet.hh"
 #include <osv/sched.hh>
 #include <osv/mem/mapping.hh>
+
+namespace mem { namespace mapping {
+extern std::atomic<uint64_t> shootdowns, shootdown_lock_ns, shootdown_ipi_ns, shootdown_ipi_ns_max;
+extern std::atomic<uint64_t> flushes_asked, flushes_coalesced;
+} }
+
 
 #include "duckdb.hpp"
 
@@ -240,6 +247,29 @@ static std::vector<uint64_t> sample_idle()
 	return ns;
 }
 
+// TLB shootdowns during a query: how many, what the round trip to every cpu
+// costs, and how many asked-for flushes a newer one covered instead.
+struct flush_snap {
+	uint64_t n, lock_ns, ipi_ns, asked, coalesced;
+	static flush_snap take()
+	{
+		using namespace ::mem::mapping;
+		return {shootdowns.load(), shootdown_lock_ns.load(), shootdown_ipi_ns.load(),
+		        flushes_asked.load(), flushes_coalesced.load()};
+	}
+};
+
+static void report_flush(const flush_snap &a, const flush_snap &b)
+{
+	uint64_t n = b.n - a.n;
+	printf("FLUSH STATS: shootdowns=%llu lock_us_avg=%.1f ipi_us_avg=%.1f ipi_us_max=%.1f "
+	       "asked=%llu coalesced=%llu\n",
+	       (unsigned long long)n, n ? (double)(b.lock_ns - a.lock_ns) / n / 1e3 : 0.0,
+	       n ? (double)(b.ipi_ns - a.ipi_ns) / n / 1e3 : 0.0,
+	       (double)::mem::mapping::shootdown_ipi_ns_max.load() / 1e3,
+	       (unsigned long long)(b.asked - a.asked), (unsigned long long)(b.coalesced - a.coalesced));
+}
+
 // Threads that live on a reserved cpu besides its worker, with cpu time.
 static uint64_t worker_ipis()
 {
@@ -436,9 +466,11 @@ int run_tpch(int argc, char **argv)
 		auto net0 = mininet::stats();
 		uint64_t epoch0 = mem::mapping::flush_epoch(), ipis0 = worker_ipis();
 		auto idle0 = sample_idle();
+		auto fl0 = flush_snap::take();
 		auto t0 = std::chrono::steady_clock::now();
 		auto r = con.Query(pragma);
 		auto t1 = std::chrono::steady_clock::now();
+		auto fl1 = flush_snap::take();
 		auto idle1 = sample_idle();
 		uint64_t epoch1 = mem::mapping::flush_epoch(), ipis1 = worker_ipis();
 		auto net1 = mininet::stats();
@@ -480,6 +512,7 @@ int run_tpch(int argc, char **argv)
 		report_net(qn, ms, net0, net1, idle0, idle1);
 		printf("TLB STATS: shootdowns=%llu worker_ipis=%llu\n", (unsigned long long)(epoch1 - epoch0),
 		       (unsigned long long)(ipis1 - ipis0));
+		report_flush(fl0, fl1);
 	}
 
 	printf("\nTPCH SUMMARY: ok=%d total=%zu ms=%.1f checked=%d matched=%d\n",

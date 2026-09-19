@@ -135,6 +135,9 @@ unique_ptr<HTTPResponse> ToResponse(const mininet::response &r) {
 
 class MininetHTTPClient : public HTTPClient {
 public:
+	//! Bodies up to this size stay cached on the thread; larger ones are one-off.
+	static constexpr idx_t BODY_CACHE_MAX = 8ull << 20;
+
 	explicit MininetHTTPClient(const string &proto_host_port)
 	    : HTTPClient(proto_host_port), host(HostOf(proto_host_port)) {
 	}
@@ -160,12 +163,29 @@ public:
 		}
 
 		const string head = RenderHead("GET", info.path, host, info.headers, info.params);
-		// Not zeroed: mininet reports how much it wrote, and a memset per
-		// ranged read is the whole cost of the call on the DuckDB thread.
-		auto body = make_unsafe_uniq_array_uninitialized<char>(want);
+		// One body buffer per DuckDB thread, kept from one request to the
+		// next. A fresh allocation of this size is a page-table populate on
+		// the way in and a depopulate with a TLB shootdown on every cpu on
+		// the way out; with 256 threads reading 1 MiB at a time the sampler
+		// found most of them queued behind that shootdown. Not zeroed:
+		// mininet reports how much it wrote.
+		static thread_local unsafe_unique_array<char> body_cache;
+		static thread_local idx_t body_cap = 0;
+		unsafe_unique_array<char> body_once;
+		char *body;
+		if (want <= BODY_CACHE_MAX) {
+			if (want > body_cap) {
+				body_cache = make_unsafe_uniq_array_uninitialized<char>(want);
+				body_cap = want;
+			}
+			body = body_cache.get();
+		} else {
+			body_once = make_unsafe_uniq_array_uninitialized<char>(want);
+			body = body_once.get();
+		}
 
 		mininet::response r {};
-		int rc = mininet::get(head.c_str(), head.size(), body.get(), want, &r);
+		int rc = mininet::get(head.c_str(), head.size(), body, want, &r);
 		if (rc != mininet::OK) {
 			return Failed(rc, "mininet: GET " + info.path);
 		}
@@ -174,7 +194,7 @@ public:
 		if (static_cast<int>(response->status) >= 400) {
 			// An error body is small and is the useful part; hand it over as
 			// the body rather than through the content handler.
-			response->body = string(body.get(), static_cast<size_t>(r.bytes));
+			response->body = string(body, static_cast<size_t>(r.bytes));
 			if (info.response_handler) {
 				info.response_handler(*response);
 			}
@@ -184,9 +204,9 @@ public:
 			return response;
 		}
 		if (info.content_handler && r.bytes > 0) {
-			info.content_handler(const_data_ptr_cast(body.get()), static_cast<idx_t>(r.bytes));
+			info.content_handler(const_data_ptr_cast(body), static_cast<idx_t>(r.bytes));
 		} else {
-			response->body = string(body.get(), static_cast<size_t>(r.bytes));
+			response->body = string(body, static_cast<size_t>(r.bytes));
 		}
 		return response;
 	}
