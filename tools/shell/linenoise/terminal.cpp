@@ -1,5 +1,7 @@
 #include "terminal.hpp"
+#ifdef __OSV__
 #include <osv/terminal.h>   // miniOSv: no ioctl
+#endif
 #include "history.hpp"
 #include "linenoise.hpp"
 #if defined(_WIN32) || defined(WIN32)
@@ -536,10 +538,14 @@ TerminalSize Terminal::GetTerminalSize() {
 	result.ws_col = csbi.srWindow.Right - csbi.srWindow.Left + 1;
 	result.ws_row = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
 #else
-	// miniOSv: no ioctl; ask the console directly.
 	{
 		struct winsize ws;
+#ifdef __OSV__
+		// miniOSv: no ioctl; ask the console directly.
 		osv_terminal_size(&ws);
+#else
+		ioctl(1, TIOCGWINSZ, &ws);
+#endif
 		result.ws_col = ws.ws_col;
 		result.ws_row = ws.ws_row;
 	}
