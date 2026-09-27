@@ -188,6 +188,11 @@ struct GetRequestInfo : public BaseRequest {
 
 	std::function<bool(const_data_ptr_t data, idx_t data_length)> content_handler;
 	std::function<bool(const HTTPResponse &response)> response_handler;
+	//! Where the body may be written directly, when the caller has a buffer of
+	//! the size it asked for: a client that does so skips content_handler.
+	//! Clients that cannot ignore it and deliver through the handler as ever.
+	data_ptr_t body_out = nullptr;
+	idx_t body_out_len = 0;
 };
 
 struct PutRequestInfo : public BaseRequest {

@@ -173,7 +173,12 @@ public:
 		static thread_local idx_t body_cap = 0;
 		unsafe_unique_array<char> body_once;
 		char *body;
-		if (want <= BODY_CACHE_MAX) {
+		// The caller's own buffer when it has one of exactly the Range's size:
+		// then the body lands where it is wanted and is not copied on again.
+		const bool direct = info.body_out != nullptr && info.body_out_len == want;
+		if (direct) {
+			body = char_ptr_cast(info.body_out);
+		} else if (want <= BODY_CACHE_MAX) {
 			if (want > body_cap) {
 				body_cache = make_unsafe_uniq_array_uninitialized<char>(want);
 				body_cap = want;
@@ -203,7 +208,9 @@ public:
 		if (info.response_handler && !info.response_handler(*response)) {
 			return response;
 		}
-		if (info.content_handler && r.bytes > 0) {
+		if (direct) {
+			// Already in place; the caller's handler would only copy it onto itself.
+		} else if (info.content_handler && r.bytes > 0) {
 			info.content_handler(const_data_ptr_cast(body), static_cast<idx_t>(r.bytes));
 		} else {
 			response->body = string(body, static_cast<size_t>(r.bytes));
