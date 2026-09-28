@@ -54,7 +54,7 @@ namespace {
 #define MININET_HOST ""
 #endif
 #ifndef MININET_ADDR
-#define MININET_ADDR "0.0.0.0"
+#define MININET_ADDR ""
 #endif
 // 0 lets mininet size the worker count to the machine; see mininet.hh.
 #ifndef MININET_WORKERS
@@ -571,6 +571,7 @@ extern "C" void osv_app_main()
 	// Best-effort, like the mount above: an image with no NIC still runs
 	// everything that does not name an http:// or s3:// path. The endpoint
 	// is compiled in -- see the build variables in miniosv/miniosv.mk.
+	// An empty MININET_ADDR resolves the host.
 	if (MININET_HOST[0] != '\0') {
 		mininet::config net {};
 		net.host = MININET_HOST;
@@ -578,7 +579,6 @@ extern "C" void osv_app_main()
 		net.tls = MININET_TLS;
 		net.workers = MININET_WORKERS;
 		net.conns_per_worker = MININET_CONNS;
-		net.resolve = MININET_RESOLVE;
 		int nrc = mininet::up(net);
 		if (nrc != mininet::OK) {
 			printf("mininet: %s; continuing without a network\n", mininet::strerror(nrc));
