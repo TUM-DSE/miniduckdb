@@ -346,8 +346,16 @@ static void report_net(int qn, double wall_ms, const mininet::conn_stats &a,
 	}
 	size_t n = idle0.size();
 	double cpu_ms = wall_ms * (double)n - idle_ms_total;
-	printf("CPUS: name=q%02d busy=%u of %zu parallelism=%.2f idle_ms=%.0f\n", qn, busy, n,
-	       wall_ms > 0 ? cpu_ms / wall_ms : 0.0, idle_ms_total);
+	// The workers never block, so an idle counter reads them as fully busy and
+	// `parallelism` counts each one as a cpu of work. Give back the cpu time
+	// they held minus the part they spent doing something; -1 when the worker
+	// count is auto and so not known here.
+	double work_ms = (double)(b.poll_work_ns - a.poll_work_ns) / 1e6;
+	double app_ms = cpu_ms - (MININET_WORKERS * wall_ms - work_ms);
+	printf("CPUS: name=q%02d busy=%u of %zu parallelism=%.2f idle_ms=%.0f workers=%d "
+	       "parallelism_app=%.2f\n",
+	       qn, busy, n, wall_ms > 0 ? cpu_ms / wall_ms : 0.0, idle_ms_total, MININET_WORKERS,
+	       (MININET_WORKERS && wall_ms > 0) ? (app_ms > 0 ? app_ms / wall_ms : 0.0) : -1.0);
 }
 
 // TPC-H over the S3 bucket mininet is pointed at, as views over read_parquet();
