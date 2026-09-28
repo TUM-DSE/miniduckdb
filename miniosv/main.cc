@@ -569,9 +569,8 @@ extern "C" void osv_app_main()
 	}
 
 	// Best-effort, like the mount above: an image with no NIC still runs
-	// everything that does not name an http:// or s3:// path. There is no
-	// resolver, so the endpoint is compiled in -- see the build variables in
-	// miniosv/miniosv.mk.
+	// everything that does not name an http:// or s3:// path. The endpoint
+	// is compiled in -- see the build variables in miniosv/miniosv.mk.
 	if (MININET_HOST[0] != '\0') {
 		mininet::config net {};
 		net.host = MININET_HOST;
@@ -579,6 +578,7 @@ extern "C" void osv_app_main()
 		net.tls = MININET_TLS;
 		net.workers = MININET_WORKERS;
 		net.conns_per_worker = MININET_CONNS;
+		net.resolve = MININET_RESOLVE;
 		int nrc = mininet::up(net);
 		if (nrc != mininet::OK) {
 			printf("mininet: %s; continuing without a network\n", mininet::strerror(nrc));

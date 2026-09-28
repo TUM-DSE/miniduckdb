@@ -223,9 +223,8 @@ include modules/mininet/mininet.mk
 $(out)/$(duckdb-objdir)/miniosv/http/%.o: CXXFLAGS += \
     $(duckdb-cxxflags) $(httpfs-includes)
 
-# main.cc brings the stack up, so it needs the endpoint. There is no resolver
-# in the guest, so the address is a build-time constant exactly as it is for
-# the benchmark:
+# main.cc brings the stack up, so it needs the endpoint, a build-time constant
+# as for the benchmark:
 #
 #     just build apps/bench/duckdb-tpch \
 #         MININET_HOST=bucket.s3.eu-north-1.amazonaws.com \
@@ -241,6 +240,9 @@ MININET_CONNS ?= 8
 # apps/bench/smoltcp-s3. The bucket policy needs no aws:SecureTransport deny
 # for this to work; the one bucket_policy.py writes doesn't add one.
 MININET_TLS ?= 1
+# 1 resolves MININET_HOST at boot and every minute after; MININET_ADDR is then
+# only the next-hop hint.
+MININET_RESOLVE ?= 0
 
 # Those reach the compiler through a target-specific variable, and make does
 # not rebuild an object when one changes -- it only compares timestamps. A
@@ -250,7 +252,7 @@ duckdb-net-stamp = $(out)/$(duckdb-objdir)/miniosv/mininet-config.stamp
 .PHONY: duckdb-net-phony
 $(duckdb-net-stamp): duckdb-net-phony
 	$(call very-quiet, $(makedir))
-	@v='$(MININET_HOST) $(MININET_ADDR) $(MININET_WORKERS) $(MININET_CONNS) $(MININET_TLS)'; \
+	@v='$(MININET_HOST) $(MININET_ADDR) $(MININET_WORKERS) $(MININET_CONNS) $(MININET_TLS) $(MININET_RESOLVE)'; \
 	 [ "$$(cat $@ 2>/dev/null)" = "$$v" ] || echo "$$v" > $@
 
 $(out)/$(duckdb-objdir)/miniosv/main.o: $(duckdb-net-stamp)
@@ -259,7 +261,8 @@ $(out)/$(duckdb-objdir)/miniosv/main.o: CXXFLAGS += \
     -DMININET_ADDR=\"$(MININET_ADDR)\" \
     -DMININET_WORKERS=$(MININET_WORKERS) \
     -DMININET_CONNS=$(MININET_CONNS) \
-    -DMININET_TLS=$(MININET_TLS)
+    -DMININET_TLS=$(MININET_TLS) \
+    -DMININET_RESOLVE=$(MININET_RESOLVE)
 
 # 1 instruments the network stack -- mininet and its dependencies, the shim,
 # the ENA driver, the DuckDB client -- for llvm-cov; see scripts/cov/.
