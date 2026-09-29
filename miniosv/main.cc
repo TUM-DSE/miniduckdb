@@ -294,10 +294,17 @@ static void report_net(int qn, double wall_ms, const mininet::conn_stats &a,
 	uint64_t done = b.requests_done - a.requests_done;
 	uint64_t wire_ns = b.wire_ns_total - a.wire_ns_total;
 	uint64_t bytes = b.body_bytes - a.body_bytes;
-	printf("REQ STATS: queue_us_avg=%llu wire_us_avg=%llu bytes=%llu mb_per_s=%.1f n=%llu\n",
+	// requests/reused are deltas, not the totals the CONN STATS line below
+	// carries: with several queries in one boot that line is the whole run,
+	// and a per-query figure is what says whether a later query was served
+	// from a cache instead of from S3.
+	printf("REQ STATS: queue_us_avg=%llu wire_us_avg=%llu bytes=%llu mb_per_s=%.1f n=%llu "
+	       "requests=%llu reused=%llu\n",
 	       (unsigned long long)avg(b.queue_ns_total - a.queue_ns_total, done) / 1000,
 	       (unsigned long long)avg(wire_ns, done) / 1000, (unsigned long long)bytes,
-	       wire_ns ? (double)bytes / ((double)wire_ns / 1e3) : 0.0, (unsigned long long)done);
+	       wire_ns ? (double)bytes / ((double)wire_ns / 1e3) : 0.0, (unsigned long long)done,
+	       (unsigned long long)(b.requests_served - a.requests_served),
+	       (unsigned long long)(b.requests_reused - a.requests_reused));
 	printf("LATENCY STATS: ttfb_us_avg=%llu xfer_us_avg=%llu\n",
 	       (unsigned long long)avg(b.ttfb_ns_total - a.ttfb_ns_total, b.ttfb_n - a.ttfb_n) / 1000,
 	       (unsigned long long)avg(b.xfer_ns_total - a.xfer_ns_total, b.xfer_n - a.xfer_n) / 1000);
@@ -439,6 +446,19 @@ int run_tpch(int argc, char **argv)
 	if (profile) {
 		con.Query("PRAGMA enable_profiling='query_tree'");
 	}
+	// Several queries share this connection, so DuckDB's external file cache
+	// would serve a later query out of RAM instead of S3 and the network
+	// measurement would quietly become a memory one. It defaults to true and
+	// is GLOBAL_ONLY, so it has to go off here, before the first query.
+	// parquet_metadata_cache and enable_http_metadata_cache already default
+	// to false, and enable_object_cache is a no-op in this version.
+	{
+		auto cr = con.Query("SET enable_external_file_cache=false");
+		if (cr->HasError()) {
+			printf("FAIL: disabling the external file cache: %s\n", cr->GetError().c_str());
+			return 1;
+		}
+	}
 	{
 		auto mr = con.Query("SELECT current_setting('memory_limit')");
 		if (!mr->HasError() && mr->RowCount() == 1) {
@@ -471,6 +491,10 @@ int run_tpch(int argc, char **argv)
 		char pragma[32];
 		snprintf(pragma, sizeof(pragma), "PRAGMA tpch(%d)", qn);
 
+		// Several queries share this boot, so start each one from zero:
+		// the sums below would survive differencing, but the maxima and
+		// the setup/dial averages would carry the whole run.
+		mininet::clear_stats();
 		auto net0 = mininet::stats();
 		uint64_t epoch0 = mem::mapping::flush_epoch(), ipis0 = worker_ipis();
 		auto idle0 = sample_idle();
