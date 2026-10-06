@@ -545,6 +545,8 @@ int run_tpch(int argc, char **argv)
 		printf("TLB STATS: shootdowns=%llu worker_ipis=%llu\n", (unsigned long long)(epoch1 - epoch0),
 		       (unsigned long long)(ipis1 - ipis0));
 		report_flush(fl0, fl1);
+		printf("MEM STATS: free=%.3f GiB\n",
+		       (double)sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30));
 	}
 
 	printf("\nTPCH SUMMARY: ok=%d total=%zu ms=%.1f checked=%d matched=%d\n",
