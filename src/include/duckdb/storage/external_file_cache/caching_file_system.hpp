@@ -98,6 +98,8 @@ private:
 	void ReconcileCacheAfterRead(CachedFile &cached_file);
 	//! Record a timed read of a local file into the throughput estimate
 	void RecordReadThroughput(double total_seconds, idx_t bytes);
+	//! The underlying FileHandle, without taking file_handle_mutex once it is open
+	FileHandle &GetOpenFileHandle();
 
 private:
 	QueryContext context;
@@ -125,6 +127,13 @@ private:
 	shared_ptr<FileHandle> file_handle;
 	//! Metadata snapshot taken with a single Stats call when the file handle is opened.
 	CacheValidationInfo validation_info;
+	//! file_handle, readable without file_handle_mutex: every scan thread reads through this one handle.
+	atomic<FileHandle *> open_file_handle;
+	//! Handles replaced on a cache generation change, kept so open_file_handle never dangles.
+	vector<shared_ptr<FileHandle>> retired_file_handles;
+	//! GetFileSize() as of external cache generation file_size_generation (INVALID_INDEX: not known yet).
+	atomic<idx_t> known_file_size;
+	atomic<idx_t> file_size_generation;
 
 	//! Current position (if non-seeking reads)
 	idx_t position;

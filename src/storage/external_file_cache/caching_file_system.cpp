@@ -232,7 +232,8 @@ shared_ptr<CachingFileHandle::CachedFile> CachingFileHandle::EnsureCachedFileCur
 		}
 		needs_reopen = file_handle != nullptr;
 		if (needs_reopen) {
-			file_handle.reset();
+			open_file_handle = nullptr;
+			retired_file_handles.push_back(std::move(file_handle));
 		}
 		cached_file = external_file_cache.GetOrCreateCachedFile(path.path);
 		current_cached_file = cached_file;
@@ -289,7 +290,8 @@ CachingFileHandle::CachingFileHandle(QueryContext context, CachingFileSystem &ca
       external_file_cache(caching_file_system_p.external_file_cache), path(path_p), flags(std::move(flags_p)),
       opener(opener_p), validate(ExternalFileCacheUtil::GetCacheValidationMode(path_p, context.GetClientContext(),
                                                                                caching_file_system_p.db)),
-      cached_file(nullptr), position(0) {
+      cached_file(nullptr), open_file_handle(nullptr), known_file_size(0), file_size_generation(DConstants::INVALID_INDEX),
+      position(0) {
 	cached_file = external_file_cache.GetOrCreateCachedFile(path_p.path);
 	if (!external_file_cache.IsEnabled() || Validate()) {
 		// If caching is disabled, or if we must validate cache entries, we always have to open the file
@@ -325,6 +327,7 @@ shared_ptr<FileHandle> CachingFileHandle::GetFileHandle() {
 	// require explicit opt-in for concurrent pread-style access (e.g., HTTPFS).
 	auto internal_flags = flags | FileFlags::FILE_FLAGS_PARALLEL_ACCESS;
 	file_handle = file_system.OpenFile(path, internal_flags, opener);
+	open_file_handle = file_handle.get();
 	// Snapshot the metadata with a single Stats call, avoiding repeated metadata lookups (e.g., fstat)
 	validation_info = GetValidationInfo(file_system, *file_handle);
 
@@ -351,6 +354,14 @@ shared_ptr<FileHandle> CachingFileHandle::GetFileHandle() {
 		}
 	}
 	return file_handle;
+}
+
+FileHandle &CachingFileHandle::GetOpenFileHandle() {
+	auto handle = open_file_handle.load(std::memory_order_acquire);
+	if (handle) {
+		return *handle;
+	}
+	return *GetFileHandle();
 }
 
 Allocator &CachingFileHandle::GetBufferAllocator() const {
@@ -502,14 +513,23 @@ string CachingFileHandle::GetPath() const {
 }
 
 idx_t CachingFileHandle::GetFileSize() {
+	const auto generation = external_file_cache.GetGeneration();
+	if (file_size_generation.load(std::memory_order_acquire) == generation) {
+		return known_file_size.load(std::memory_order_relaxed);
+	}
+	idx_t file_size;
 	if (!Validate()) {
 		auto current_cached_file = EnsureCachedFileCurrent();
 		annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
-		return current_cached_file->validation_info.file_size;
+		file_size = current_cached_file->validation_info.file_size;
+	} else {
+		auto file_handle = GetFileHandle();
+		annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+		file_size = validation_info.file_size;
 	}
-	auto file_handle = GetFileHandle();
-	annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
-	return validation_info.file_size;
+	known_file_size.store(file_size, std::memory_order_relaxed);
+	file_size_generation.store(generation, std::memory_order_release);
+	return file_size;
 }
 
 timestamp_t CachingFileHandle::GetLastModifiedTime() {
@@ -608,26 +628,26 @@ bool ReadThroughputEstimator::TryEstimate(NetworkThroughputEstimate &result) con
 
 bool CachingFileHandle::TryGetNetworkThroughput(NetworkThroughputEstimate &result) {
 	// Remote files measure throughput in their own file system; local files fit it from this handle's own reads.
-	if (GetFileHandle()->TryGetNetworkThroughput(result)) {
+	if (GetOpenFileHandle().TryGetNetworkThroughput(result)) {
 		return true;
 	}
 	return throughput_estimator.TryEstimate(result);
 }
 
 void CachingFileHandle::ReadAndRecord(QueryContext context, data_ptr_t buffer, idx_t nr_bytes, idx_t location) {
-	auto handle = GetFileHandle();
-	if (handle->file_system.IsLocalFileSystem()) {
+	auto &handle = GetOpenFileHandle();
+	if (handle.file_system.IsLocalFileSystem()) {
 		// Pre-fault local read buffers before the kernel fills them.
 		for (idx_t offset = 0; offset < nr_bytes; offset += 4096) {
 			buffer[offset] = 0;
 		}
 	}
 	const auto read_start = steady_clock::now();
-	handle->Read(context, buffer, nr_bytes, location);
-	auto cache_valid_until = handle->file_system.GetCacheValidUntil(*handle);
+	handle.Read(context, buffer, nr_bytes, location);
+	auto cache_valid_until = handle.file_system.GetCacheValidUntil(handle);
 	if (cache_valid_until) {
 		const annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
-		if (file_handle == handle) {
+		if (file_handle.get() == &handle) {
 			TightenCacheDeadline(validation_info.cache_valid_until, cache_valid_until);
 		}
 	}
