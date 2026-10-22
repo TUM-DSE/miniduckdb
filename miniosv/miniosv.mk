@@ -54,16 +54,13 @@ jemalloc-includes := -I$(duckdb-dir)/third_party/jemalloc/include
 # DUCKDB_VERSION / DUCKDB_SOURCE_ID: upstream's CMake derives these from git
 # and src/function/table/version/pragma_version.cpp does not compile without
 # them. sources.mk carries the captured values.
-# -DDUCKDB_FORCE_ASSERT: the kernel's assert.h keeps assert() live whenever
-#  _KERNEL is defined, which it is for every object here, so NDEBUG cannot
-#  switch DuckDB's asserts off. Left alone, assert.hpp takes its "not a debug
-#  build" branch, where D_ASSERT is plain assert() -- live -- while
-#  D_ASSERT_IS_ENABLED stays undefined, so helpers guarded by it are not
-#  compiled; v2.0's src/common/sort/hashed_sort.cpp uses one inside a
-#  D_ASSERT. This takes the asserts-enabled branch instead, which is
-#  self-consistent and routes them through DuckDBAssertInternal.
-duckdb-defines := -DDUCKDB_FORCE_ASSERT \
-                  -DDUCKDB_DISABLE_BUILTIN_HTTPLIB \
+# release_assert.hpp (force-included): D_ASSERT compiles to nothing, as in
+#  upstream's release build. NDEBUG cannot do it here: the kernel's assert.h
+#  keeps assert() live whenever _KERNEL is defined, which it is for every object
+#  here. DUCKDB_FORCE_ASSERT would make the asserts self-consistent instead, but
+#  it also enables D_ASSERT_IS_ENABLED and with it the Verify() walks, which
+#  cost TPC-H Q04 a factor of ten.
+duckdb-defines := -DDUCKDB_DISABLE_BUILTIN_HTTPLIB \
                   -DDUCKDB_ENABLE_JEMALLOC \
                   -DDUCKDB_VERSION=\"$(duckdb-version)\" \
                   -DDUCKDB_SOURCE_ID=\"$(duckdb-source-id)\"
@@ -79,6 +76,7 @@ duckdb-commonflags := $(duckdb-includes) $(jemalloc-includes) $(duckdb-defines) 
 # defines them. The benchmark runner reads every .benchmark file with one.
 duckdb-cxxflags := $(duckdb-commonflags) \
                    -include $(duckdb-miniosv)/stubs/wchar_shim.hpp \
+                   -include $(duckdb-miniosv)/stubs/release_assert.hpp \
                    -include include/osv/fstream_shim.hpp
 duckdb-cflags   := $(duckdb-commonflags)
 
@@ -152,5 +150,93 @@ $(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += $(duckdb-includes) \
     -I$(duckdb-dir)/extension/tpch/include \
     -include $(duckdb-miniosv)/stubs/wchar_shim.hpp \
     -include include/osv/fstream_shim.hpp -w -Wno-error
+
+
+# --- httpfs -----------------------------------------------------------------
+#
+# miniosv/httpfs/ is a vendored copy of the parts of duckdb-httpfs we build, taken
+# at 77392a72 (the commit this DuckDB pins in
+# .github/config/extensions/httpfs.cmake) and changed in place since: a ranged
+# read names its own buffer (body_out), so the client can write the body
+# straight into it. Its HTTP clients are chosen by which file gets compiled, so
+# leaving them out and supplying miniosv/http/mininet_client.cpp instead is all
+# it takes.
+#
+# Not vendored:
+#   http/httpfs_httplib_client, http/httpfs_curl_client, http/httpfs_client_wasm
+#       replaced by ours; the first two want sockets, libcurl and OpenSSL.
+#       miniosv/http/curl_unsupported.cpp supplies what httpfs needs of the
+#       curl backend it installs by default, routed to mininet.
+#   crypto.cpp
+#       OpenSSL, and only reachable through OVERRIDE_ENCRYPTION_UTILS. Leaving
+#       that undefined keeps EncryptionUtil as core's mbedtls implementation,
+#       which is already compiled in -- so SigV4 needs nothing further.
+
+httpfs-dir := $(duckdb-miniosv)/httpfs
+httpfs-sources := $(addprefix $(httpfs-dir)/, \
+    create_secret_functions.cpp hffs.cpp httpfs_extension.cpp \
+    http/httpfs.cpp http/httpfs_transport.cpp http/httpfs_certificates.cpp \
+    http/http_request.cpp http/http_request_session.cpp http/http_settings.cpp \
+    http/http_state.cpp \
+    s3/s3_auth.cpp s3/s3_delete.cpp s3/s3_endpoint.cpp s3/s3_list.cpp \
+    s3/s3_provider.cpp s3/s3_request.cpp s3/s3_settings.cpp \
+    s3/s3_upload_session.cpp s3/s3_url.cpp s3/s3_xml_response.cpp s3/s3fs.cpp)
+httpfs-objects := $(httpfs-sources:.cpp=.o)
+httpfs-includes := -I$(httpfs-dir)/include
+
+$(out)/$(httpfs-dir)/%.o: CXXFLAGS += $(httpfs-includes)
+
+# Our client, and the C++ side of the stack it talks to.
+include modules/mininet/mininet.mk
+
+$(out)/$(duckdb-miniosv)/http/%.o: CXXFLAGS += $(duckdb-cxxflags) $(httpfs-includes)
+$(out)/$(duckdb-miniosv)/static_extensions.o: CXXFLAGS += $(httpfs-includes)
+
+# main.cc brings the stack up, so it needs the endpoint:
+#
+#     make MININET_HOST=bucket.s3.eu-north-1.amazonaws.com
+#
+# Leave MININET_HOST empty and the image simply has no network. MININET_ADDR
+# pins an address to dial instead of resolving the host.
+MININET_HOST ?=
+MININET_ADDR ?=
+MININET_WORKERS ?= 2
+MININET_CONNS ?= 8
+# 0 dials plain HTTP on port 80 instead of TLS on 443.
+MININET_TLS ?= 1
+
+# Those reach the compiler through a target-specific variable, and make does
+# not rebuild an object when one changes -- it only compares timestamps. A
+# stale address does not fail, it dials the wrong host, so record them in a
+# file and depend on that.
+duckdb-net-stamp = $(out)/$(duckdb-miniosv)/mininet-config.stamp
+.PHONY: duckdb-net-phony
+$(duckdb-net-stamp): duckdb-net-phony
+	$(call very-quiet, $(makedir))
+	@v='$(MININET_HOST) $(MININET_ADDR) $(MININET_WORKERS) $(MININET_CONNS) $(MININET_TLS)'; \
+	 [ "$$(cat $@ 2>/dev/null)" = "$$v" ] || echo "$$v" > $@
+
+$(out)/$(duckdb-miniosv)/main.o: $(duckdb-net-stamp)
+$(out)/$(duckdb-miniosv)/main.o: CXXFLAGS += \
+    -DMININET_HOST=\"$(MININET_HOST)\" \
+    -DMININET_ADDR=\"$(MININET_ADDR)\" \
+    -DMININET_WORKERS=$(MININET_WORKERS) \
+    -DMININET_CONNS=$(MININET_CONNS) \
+    -DMININET_TLS=$(MININET_TLS)
+
+# 1 instruments the network stack -- mininet and its dependencies, the shim,
+# the NIC drivers, the DuckDB client -- for llvm-cov; see scripts/cov/.
+MININET_COV ?= 0
+ifeq ($(MININET_COV),1)
+export RUSTFLAGS += -Cinstrument-coverage
+$(out)/modules/mininet/%.o $(out)/drivers/enav2/%.o $(out)/$(duckdb-miniosv)/http/%.o: \
+    CXXFLAGS += -fprofile-instr-generate -fcoverage-mapping
+app-objects += $(duckdb-miniosv)/cov.o
+endif
+
+app-objects += $(httpfs-objects)
+app-objects += $(duckdb-miniosv)/http/mininet_client.o
+app-objects += $(duckdb-miniosv)/http/curl_unsupported.o
+app-objects += $(mininet-lib-objects)
 
 # The .cpp pattern rule lives in the top-level Makefile: llama.cpp needs it too.

@@ -29,6 +29,7 @@
 #include "parquet_extension.hpp"
 #include "tpch_extension.hpp"
 #include "autocomplete_extension.hpp"
+#include "httpfs_extension.hpp"
 
 extern "C" int32_t duckdb_register_static_extensions(void)
 {
@@ -41,5 +42,9 @@ extern "C" int32_t duckdb_register_static_extensions(void)
 	result |= duckdb_register_static_extension(&StaticExtensionDescriber<ParquetExtension>::Describe);
 	result |= duckdb_register_static_extension(&StaticExtensionDescriber<TpchExtension>::Describe);
 	result |= duckdb_register_static_extension(&StaticExtensionDescriber<AutocompleteExtension>::Describe);
+	// https:// and s3://, over modules/mininet. Registering it costs nothing
+	// when the network is down: the filesystems only reach the stack when a
+	// path names one of their schemes.
+	result |= duckdb_register_static_extension(&StaticExtensionDescriber<HttpfsExtension>::Describe);
 	return result;
 }

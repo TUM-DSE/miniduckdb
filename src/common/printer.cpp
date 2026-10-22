@@ -14,7 +14,9 @@
 #endif
 #endif
 
+#ifdef __OSV__
 #include <osv/terminal.h>
+#endif
 
 namespace duckdb {
 
@@ -76,8 +78,12 @@ idx_t Printer::TerminalWidth() {
 	return rows;
 #else
 	struct winsize w = {};
+#ifdef __OSV__
 	// miniOSv: no ioctl. The console answers for its own geometry.
 	osv_terminal_size(&w);
+#else
+	ioctl(0, TIOCGWINSZ, &w);
+#endif
 	if (w.ws_col == 0) {
 		return 120;
 	}

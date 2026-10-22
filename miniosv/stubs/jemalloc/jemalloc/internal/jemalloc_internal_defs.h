@@ -29,7 +29,10 @@
 /*
  * __linux__ is defined, so jemalloc would probe /proc/sys/vm/overcommit_memory
  * at startup. There is no /proc: open() returns -1 and it silently concludes
- * the OS does not overcommit. Skip the pointless syscall.
+ * the OS does not overcommit. Skip the syscall; pages.c sets os_overcommits
+ * for __OSV__ instead, because with it false jemalloc maps every grown extent
+ * PROT_NONE and cannot commit it (no MAP_FIXED), so nothing retained is ever
+ * reused and each allocation is a fresh mmap: 321k per TPC-H Q08 at sf=100.
  */
 #undef JEMALLOC_PROC_SYS_VM_OVERCOMMIT_MEMORY
 

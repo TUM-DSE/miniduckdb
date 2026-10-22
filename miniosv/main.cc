@@ -14,14 +14,29 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <cstring>
+#include <chrono>
+#include <cmath>
 #include <string>
+#include <thread>
 #include <vector>
+#include <atomic>
 
 #include "core/mem/heap/histogram.hh"
 #include <osv/bootargs.hh>
 
 #include "modules/miniext/miniext.hh"
+#include "modules/mininet/mininet.hh"
+#include <osv/sched.hh>
+#include <osv/mem/mapping.hh>
+
+namespace mem { namespace mapping {
+extern std::atomic<uint64_t> shootdowns, shootdown_lock_ns, shootdown_ipi_ns, shootdown_ipi_ns_max;
+extern std::atomic<uint64_t> flushes_asked, flushes_coalesced;
+} }
+
 
 #include "duckdb.hpp"
 
@@ -36,10 +51,32 @@ int duckdb_shell_main(int argc, const char **argv);
 
 namespace {
 
+// The endpoint mininet is brought up for, baked in at build time because the
+// guest has no resolver. Empty host means "no network"; see miniosv.mk.
+#ifndef MININET_HOST
+#define MININET_HOST ""
+#endif
+#ifndef MININET_ADDR
+#define MININET_ADDR ""
+#endif
+// 0 lets mininet size the worker count to the machine; see mininet.hh.
+#ifndef MININET_WORKERS
+#define MININET_WORKERS 0
+#endif
+#ifndef MININET_CONNS
+#define MININET_CONNS 8
+#endif
+#ifndef MININET_TLS
+#define MININET_TLS 1
+#endif
+
 // NVMe controller 1 is the data disk (run.py --emulated-nvme); 0 is the boot
 // disk. Mounting is best-effort so an image with no data disk still starts.
 const int DATA_NVME_ID = 1;
 const char *MOUNT_POINT = "/db";
+
+// TLS or not, as mininet was brought up: mininet.tls=0 on the boot line dials plain HTTP.
+int net_tls = MININET_TLS;
 
 struct executable {
 	const char *name;
@@ -49,6 +86,8 @@ struct executable {
 // Runs SQL against a real on-disk database through MiniextFileSystem. This is
 // the scaffolding the benchmark runner and the CLI plug into once their
 // LocalFileSystem dependency is settled; see PLAN_duckdb.md.
+static std::vector<uint64_t> sample_idle();
+
 int run_sql(int argc, char **argv)
 {
 	const char *database = nullptr;
@@ -64,6 +103,9 @@ int run_sql(int argc, char **argv)
 	// No file_system override: DuckDB's default is
 	// VirtualFileSystem(FileSystem::CreateLocal()), and CreateLocal() now
 	// returns the miniext-backed LocalFileSystem.
+	printf("memory: phys=%.1f GiB free=%.1f GiB\n",
+	       (double)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30),
+	       (double)sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30));
 	duckdb::DuckDB db(database);
 	duckdb::Connection con(db);
 
@@ -72,12 +114,25 @@ int run_sql(int argc, char **argv)
 	}
 	for (const char *sql : statements) {
 		printf("\n> %s\n", sql);
+		uint64_t epoch0 = mem::mapping::flush_epoch();
+		auto idle0 = sample_idle();
+		auto t0 = std::chrono::steady_clock::now();
 		auto result = con.Query(sql);
+		double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		auto idle1 = sample_idle();
+		double idle_ms = 0;
+		for (size_t i = 0; i < idle0.size(); i++) {
+			idle_ms += (double)(idle1[i] - idle0[i]) / 1e6;
+		}
 		if (result->HasError()) {
 			printf("Error: %s\n", result->GetError().c_str());
 		} else {
 			printf("%s\n", result->ToString().c_str());
 		}
+		printf("SQL: %.1f ms, %llu tlb shootdowns, cpus=%.1f, free=%.2f GiB\n", ms,
+		       (unsigned long long)(mem::mapping::flush_epoch() - epoch0),
+		       ms > 0 ? (ms * idle0.size() - idle_ms) / ms : 0.0,
+		       (double)sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30));
 	}
 	return 0;
 }
@@ -87,10 +142,464 @@ int run_cli(int argc, char **argv)
 	return duckdb_shell_main(argc, const_cast<const char **>(argv));
 }
 
+// One row per column, pipe-separated, matching the format TPC-H's own answer
+// files use (extension/tpch/dbgen -- TPCH_ANSWERS_SF*) so it can be compared
+// against tpch_answers() without a bespoke parser on either side.
+std::string format_pipe(duckdb::QueryResult &r)
+{
+	std::string out;
+	duckdb::idx_t cols = r.ColumnCount();
+	for (duckdb::idx_t c = 0; c < cols; c++) {
+		if (c) out += '|';
+		out += r.ColumnName(c).GetIdentifierName();
+	}
+	out += '\n';
+	while (auto chunk = r.Fetch()) {
+		for (duckdb::idx_t i = 0; i < chunk->size(); i++) {
+			for (duckdb::idx_t c = 0; c < cols; c++) {
+				if (c) out += '|';
+				out += chunk->GetValue(c, i).ToString();
+			}
+			out += '\n';
+		}
+	}
+	return out;
+}
+
+// The first column of the first row, or NULL if there is none.
+duckdb::Value first_value(duckdb::QueryResult &r)
+{
+	auto chunk = r.Fetch();
+	return chunk && chunk->size() ? chunk->GetValue(0, 0) : duckdb::Value();
+}
+
+std::string trim_trailing(std::string s)
+{
+	while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) {
+		s.pop_back();
+	}
+	return s;
+}
+
+std::vector<std::vector<std::string>> split_pipe_rows(const std::string &s)
+{
+	std::vector<std::vector<std::string>> rows;
+	std::vector<std::string> row;
+	std::string field;
+	auto flush_field = [&] {
+		row.push_back(field);
+		field.clear();
+	};
+	auto flush_row = [&] {
+		flush_field();
+		rows.push_back(row);
+		row.clear();
+	};
+	for (char c : s) {
+		if (c == '|') {
+			flush_field();
+		} else if (c == '\n') {
+			flush_row();
+		} else {
+			field += c;
+		}
+	}
+	if (!field.empty() || !row.empty()) {
+		flush_row();
+	}
+	return rows;
+}
+
+// Field-by-field, numeric-tolerant: exact for flags/names, tolerant for
+// numbers. Needed because the canned answers (baked from this DuckDB
+// version's own dbgen) and the parquet `just setup apps/bench/duckdb-tpch`
+// uploaded (generated by whatever `nix run nixpkgs#duckdb` resolves to) do
+// not always agree on l_quantity's column type -- SUM(l_quantity) prints
+// "37734107" from one dbgen generation and "37734107.00" from the other,
+// same value. A real mismatch (wrong row, wrong flag, a sum off by more than
+// float noise) still fails this.
+bool answers_match(const std::string &want, const std::string &got)
+{
+	auto w = split_pipe_rows(want);
+	auto g = split_pipe_rows(got);
+	if (w.size() != g.size()) {
+		return false;
+	}
+	for (size_t r = 0; r < w.size(); r++) {
+		if (w[r].size() != g[r].size()) {
+			return false;
+		}
+		for (size_t c = 0; c < w[r].size(); c++) {
+			const std::string &a = w[r][c];
+			const std::string &b = g[r][c];
+			if (a == b) {
+				continue;
+			}
+			char *ea, *eb;
+			double da = strtod(a.c_str(), &ea);
+			double db = strtod(b.c_str(), &eb);
+			bool a_numeric = ea != a.c_str() && *ea == '\0';
+			bool b_numeric = eb != b.c_str() && *eb == '\0';
+			if (!a_numeric || !b_numeric) {
+				return false;
+			}
+			double tol = 1e-6 * std::max(1.0, std::fabs(da));
+			if (std::fabs(da - db) > tol) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+static std::vector<uint64_t> sample_idle()
+{
+	std::vector<uint64_t> ns;
+	for (auto *c : sched::cpus) {
+		ns.push_back(c->idle_thread ? (uint64_t)c->idle_thread->thread_clock().count() : 0);
+	}
+	return ns;
+}
+
+// TLB shootdowns during a query: how many, what the round trip to every cpu
+// costs, and how many asked-for flushes a newer one covered instead.
+struct flush_snap {
+	uint64_t n, lock_ns, ipi_ns, asked, coalesced;
+	static flush_snap take()
+	{
+		using namespace ::mem::mapping;
+		return {shootdowns.load(), shootdown_lock_ns.load(), shootdown_ipi_ns.load(),
+		        flushes_asked.load(), flushes_coalesced.load()};
+	}
+};
+
+static void report_flush(const flush_snap &a, const flush_snap &b)
+{
+	uint64_t n = b.n - a.n;
+	printf("FLUSH STATS: shootdowns=%llu lock_us_avg=%.1f ipi_us_avg=%.1f ipi_us_max=%.1f "
+	       "asked=%llu coalesced=%llu\n",
+	       (unsigned long long)n, n ? (double)(b.lock_ns - a.lock_ns) / n / 1e3 : 0.0,
+	       n ? (double)(b.ipi_ns - a.ipi_ns) / n / 1e3 : 0.0,
+	       (double)::mem::mapping::shootdown_ipi_ns_max.load() / 1e3,
+	       (unsigned long long)(b.asked - a.asked), (unsigned long long)(b.coalesced - a.coalesced));
+}
+
+// Threads that live on a reserved cpu besides its worker, with cpu time.
+static uint64_t worker_ipis()
+{
+	uint64_t n = 0;
+	for (auto *c : sched::cpus) {
+		if (c->reserved.load()) {
+			n += c->tlb_ipis.load();
+		}
+	}
+	return n;
+}
+
+static uint64_t avg(uint64_t total, uint64_t n)
+{
+	return n ? total / n : 0;
+}
+
+static void report_net(int qn, double wall_ms, const mininet::conn_stats &a,
+                       const mininet::conn_stats &b, const std::vector<uint64_t> &idle0,
+                       const std::vector<uint64_t> &idle1)
+{
+	uint64_t done = b.requests_done - a.requests_done;
+	uint64_t wire_ns = b.wire_ns_total - a.wire_ns_total;
+	uint64_t bytes = b.body_bytes - a.body_bytes;
+	// requests/reused are deltas, not the totals the CONN STATS line below
+	// carries: with several queries in one boot that line is the whole run,
+	// and a per-query figure is what says whether a later query was served
+	// from a cache instead of from S3.
+	printf("REQ STATS: queue_us_avg=%llu wire_us_avg=%llu bytes=%llu mb_per_s=%.1f n=%llu "
+	       "requests=%llu reused=%llu\n",
+	       (unsigned long long)avg(b.queue_ns_total - a.queue_ns_total, done) / 1000,
+	       (unsigned long long)avg(wire_ns, done) / 1000, (unsigned long long)bytes,
+	       wire_ns ? (double)bytes / ((double)wire_ns / 1e3) : 0.0, (unsigned long long)done,
+	       (unsigned long long)(b.requests_served - a.requests_served),
+	       (unsigned long long)(b.requests_reused - a.requests_reused));
+	printf("LATENCY STATS: ttfb_us_avg=%llu xfer_us_avg=%llu\n",
+	       (unsigned long long)avg(b.ttfb_ns_total - a.ttfb_ns_total, b.ttfb_n - a.ttfb_n) / 1000,
+	       (unsigned long long)avg(b.xfer_ns_total - a.xfer_ns_total, b.xfer_n - a.xfer_n) / 1000);
+	uint64_t iters = b.poll_iters - a.poll_iters;
+	printf("POLL STATS: iters=%llu gap_us_avg=%.2f gap_us_max=%llu gaps_over_1ms=%llu busy_ms=%.0f "
+	       "active=%llu work_ms=%.0f busy_us_max=%llu loop_us_max=%llu\n",
+	       (unsigned long long)iters,
+	       iters ? (double)(b.poll_gap_ns_total - a.poll_gap_ns_total) / iters / 1e3 : 0.0,
+	       (unsigned long long)b.poll_gap_ns_max / 1000,
+	       (unsigned long long)(b.poll_gaps_over_1ms - a.poll_gaps_over_1ms),
+	       (double)(b.poll_busy_ns - a.poll_busy_ns) / 1e6,
+	       (unsigned long long)(b.poll_active_iters - a.poll_active_iters),
+	       (double)(b.poll_work_ns - a.poll_work_ns) / 1e6, (unsigned long long)b.poll_busy_ns_max / 1000,
+	       (unsigned long long)b.poll_loop_ns_max / 1000);
+	printf("STALL STATS: iface_us_max=%llu steps_us_max=%llu rx_pkts_max=%llu tx_pkts_max=%llu\n",
+	       (unsigned long long)b.iface_ns_max / 1000, (unsigned long long)b.steps_ns_max / 1000,
+	       (unsigned long long)b.rx_pkts_max, (unsigned long long)b.tx_pkts_max);
+	uint64_t wakes = b.wake_n - a.wake_n;
+	printf("WAKE STATS: n=%llu ns_avg=%llu us_max=%.1f ms_total=%.1f\n", (unsigned long long)wakes,
+	       (unsigned long long)avg(b.wake_ns_total - a.wake_ns_total, wakes), (double)b.wake_ns_max / 1e3,
+	       (double)(b.wake_ns_total - a.wake_ns_total) / 1e6);
+	printf("SETUP STATS: conns=%llu failed=%llu syn_retries=0 setup_us_avg=%llu setup_us_max=%llu dial_us_avg=%llu\n",
+	       (unsigned long long)(b.conns_established - a.conns_established),
+	       (unsigned long long)(b.conns_failed - a.conns_failed), (unsigned long long)b.setup.us_avg,
+	       (unsigned long long)b.setup.us_max, (unsigned long long)b.dial.us_avg);
+	printf("BUF STATS: retried=%llu\n", (unsigned long long)(b.requests_retried - a.requests_retried));
+	printf("DROP STATS: imissed=%llu ierrors=%llu rx_nombuf=%llu misrouted=%llu tx_alloc_fail=%llu "
+	       "tx_burst_fail=%llu ipackets=%llu ibytes=%llu\n",
+	       (unsigned long long)(b.nic_imissed - a.nic_imissed),
+	       (unsigned long long)(b.nic_ierrors - a.nic_ierrors),
+	       (unsigned long long)(b.nic_rx_nombuf - a.nic_rx_nombuf),
+	       (unsigned long long)(b.misrouted_drops - a.misrouted_drops),
+	       (unsigned long long)(b.tx_alloc_fail - a.tx_alloc_fail),
+	       (unsigned long long)(b.tx_burst_fail - a.tx_burst_fail),
+	       (unsigned long long)(b.nic_ipackets - a.nic_ipackets),
+	       (unsigned long long)(b.nic_ibytes - a.nic_ibytes));
+
+	unsigned busy = 0;
+	double idle_ms_total = 0;
+	for (size_t i = 0; i < idle0.size() && i < idle1.size(); i++) {
+		double idle_ms = (double)(idle1[i] - idle0[i]) / 1e6;
+		idle_ms_total += idle_ms;
+		if (idle_ms < wall_ms / 2) {
+			busy++;
+		}
+	}
+	size_t n = idle0.size();
+	double cpu_ms = wall_ms * (double)n - idle_ms_total;
+	// The workers never block, so an idle counter reads them as fully busy and
+	// `parallelism` counts each one as a cpu of work. Give back the cpu time
+	// they held minus the part they spent doing something; -1 when the worker
+	// count is auto and so not known here.
+	double work_ms = (double)(b.poll_work_ns - a.poll_work_ns) / 1e6;
+	double app_ms = cpu_ms - (MININET_WORKERS * wall_ms - work_ms);
+	printf("CPUS: name=q%02d busy=%u of %zu parallelism=%.2f idle_ms=%.0f workers=%d "
+	       "parallelism_app=%.2f\n",
+	       qn, busy, n, wall_ms > 0 ? cpu_ms / wall_ms : 0.0, idle_ms_total, MININET_WORKERS,
+	       (MININET_WORKERS && wall_ms > 0) ? (app_ms > 0 ? app_ms / wall_ms : 0.0) : -1.0);
+}
+
+// TPC-H over the S3 bucket mininet is pointed at, as views over read_parquet();
+// query text and canned answers (sf 0.01/0.1/1) come from the tpch extension.
+//
+//     tpch --sf 1 6          run Q06 at sf=1
+//     tpch --sf 1 1 6 10     run Q01, Q06, Q10 at sf=1
+//     tpch --sf 1            run all 22
+//     tpch --sf 1 --async 64 run all 22 with 64 async I/O threads
+int run_tpch(int argc, char **argv)
+{
+	double sf = 1.0;
+	int threads = 0;
+	int async_threads = -1;
+	const char *memlimit = nullptr;
+	bool profile = false;
+	std::vector<int> queries;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--sf") == 0 && i + 1 < argc) {
+			sf = atof(argv[++i]);
+		} else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+			threads = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--async") == 0 && i + 1 < argc) {
+			async_threads = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--memlimit") == 0 && i + 1 < argc) {
+			memlimit = argv[++i];
+		} else if (strcmp(argv[i], "--profile") == 0) {
+			profile = true;
+		} else if (argv[i][0] == '-') {
+			printf("FAIL: unknown option '%s'\n", argv[i]);
+			return 1;
+		} else {
+			int n = atoi(argv[i]);
+			if (n >= 1 && n <= 22) {
+				queries.push_back(n);
+			}
+		}
+	}
+	if (queries.empty()) {
+		for (int q = 1; q <= 22; q++) {
+			queries.push_back(q);
+		}
+	}
+
+	if (MININET_HOST[0] == '\0') {
+		printf("FAIL: tpch needs a network -- build with "
+		       "just build apps/bench/duckdb-tpch "
+		       "MININET_HOST=<bucket>.s3.<region>.amazonaws.com\n");
+		return 1;
+	}
+
+	// Must match the tpch/sf<N>/ prefix the setup uploaded to.
+	char sf_str[32];
+	if (sf == (double)(long long)sf) {
+		snprintf(sf_str, sizeof(sf_str), "%lld", (long long)sf);
+	} else {
+		snprintf(sf_str, sizeof(sf_str), "%g", sf);
+	}
+
+	const char *scheme = net_tls ? "https" : "http";
+	printf("tpch: sf=%s, %zu quer%s, bucket %s (%s)\n", sf_str, queries.size(),
+	       queries.size() == 1 ? "y" : "ies", MININET_HOST, scheme);
+
+	duckdb::DuckDB db(nullptr);
+	duckdb::Connection con(db);
+
+	if (threads > 0) {
+		char tsql[64];
+		snprintf(tsql, sizeof(tsql), "SET threads=%d", threads);
+		auto tr = con.Query(tsql);
+		if (tr->HasError()) {
+			printf("FAIL: %s: %s\n", tsql, tr->GetError().c_str());
+			return 1;
+		}
+	}
+	// The pool DuckDB's async I/O runs on: the parquet scan's column fetches are its tasks.
+	if (async_threads >= 0) {
+		char asql[64];
+		snprintf(asql, sizeof(asql), "SET async_threads=%d", async_threads);
+		auto ar = con.Query(asql);
+		if (ar->HasError()) {
+			printf("FAIL: %s: %s\n", asql, ar->GetError().c_str());
+			return 1;
+		}
+	}
+	if (memlimit) {
+		char msql[64];
+		snprintf(msql, sizeof(msql), "SET memory_limit='%s'", memlimit);
+		auto mr = con.Query(msql);
+		if (mr->HasError()) {
+			printf("FAIL: %s: %s\n", msql, mr->GetError().c_str());
+			return 1;
+		}
+	}
+	if (profile) {
+		con.Query("PRAGMA enable_profiling='query_tree'");
+	}
+	// Several queries share this connection, so DuckDB's external file cache
+	// would serve a later query out of RAM instead of S3 and the network
+	// measurement would quietly become a memory one. It defaults to true and
+	// is GLOBAL_ONLY, so it has to go off here, before the first query.
+	// parquet_metadata_cache and enable_http_metadata_cache already default
+	// to false, and enable_object_cache is a no-op in this version.
+	{
+		auto cr = con.Query("SET enable_external_file_cache=false");
+		if (cr->HasError()) {
+			printf("FAIL: disabling the external file cache: %s\n", cr->GetError().c_str());
+			return 1;
+		}
+	}
+	{
+		auto mr = con.Query("SELECT current_setting('memory_limit')");
+		if (!mr->HasError() && mr->RowCount() == 1) {
+			printf("memory: limit=%s\n", first_value(*mr).ToString().c_str());
+		}
+	}
+	{
+		auto ar = con.Query("SELECT current_setting('async_threads')");
+		printf("cpus: hw_concurrency=%u duckdb_threads=%llu async_threads=%s\n", std::thread::hardware_concurrency(),
+		       (unsigned long long)db.NumberOfThreads(),
+		       ar->HasError() ? "?" : first_value(*ar).ToString().c_str());
+	}
+
+	static const char *tables[] = {"customer", "lineitem", "nation",  "orders",
+	                                "part",     "partsupp", "region", "supplier"};
+	for (const char *t : tables) {
+		char sql[512];
+		snprintf(sql, sizeof(sql),
+		         "CREATE VIEW %s AS SELECT * FROM "
+		         "read_parquet('%s://%s/tpch/sf%s/%s.parquet');",
+		         t, scheme, MININET_HOST, sf_str, t);
+		auto r = con.Query(sql);
+		if (r->HasError()) {
+			printf("FAIL: view %s: %s\n", t, r->GetError().c_str());
+			return 1;
+		}
+	}
+
+	int ok = 0, checked = 0, matched = 0;
+	double total_ms = 0;
+	for (int qn : queries) {
+		char pragma[32];
+		snprintf(pragma, sizeof(pragma), "PRAGMA tpch(%d)", qn);
+
+		// Several queries share this boot, so start each one from zero:
+		// the sums below would survive differencing, but the maxima and
+		// the setup/dial averages would carry the whole run.
+		mininet::clear_stats();
+		auto net0 = mininet::stats();
+		uint64_t epoch0 = mem::mapping::flush_epoch(), ipis0 = worker_ipis();
+		auto idle0 = sample_idle();
+		auto fl0 = flush_snap::take();
+		auto t0 = std::chrono::steady_clock::now();
+		auto r = con.Query(pragma);
+		auto t1 = std::chrono::steady_clock::now();
+		auto fl1 = flush_snap::take();
+		auto idle1 = sample_idle();
+		uint64_t epoch1 = mem::mapping::flush_epoch(), ipis1 = worker_ipis();
+		auto net1 = mininet::stats();
+		double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+		total_ms += ms;
+
+		if (r->HasError()) {
+			printf("Q%02d: FAIL %.1f ms: %s\n", qn, ms, r->GetError().c_str());
+			continue;
+		}
+		ok++;
+
+		// tpch_answers() only knows sf 0.01/0.1/1; anything else is unchecked.
+		const char *match = "unchecked";
+		char asql[128];
+		snprintf(asql, sizeof(asql),
+		         "SELECT answer FROM tpch_answers() WHERE query_nr = %d AND scale_factor = %s",
+		         qn, sf_str);
+		auto ares = con.Query(asql);
+		if (!ares->HasError() && ares->RowCount() == 1) {
+			checked++;
+			std::string want = trim_trailing(first_value(*ares).ToString());
+			std::string got = trim_trailing(format_pipe(*r));
+			bool eq = answers_match(want, got);
+			match = eq ? "yes" : "no";
+			if (eq) {
+				matched++;
+			} else {
+				printf("Q%02d mismatch\n  want: %s\n  got:  %s\n", qn,
+				       want.c_str(), got.c_str());
+			}
+		}
+
+		printf("Q%02d: %.1f ms, %llu rows, match=%s, net_ms=%.1f, net_calls=%llu, net_active_ms=%.1f\n", qn,
+		       ms, (unsigned long long)r->RowCount(), match,
+		       (double)(net1.get_ns_total - net0.get_ns_total) / 1e6,
+		       (unsigned long long)(net1.get_calls - net0.get_calls),
+		       (double)(net1.active_ns_total - net0.active_ns_total) / 1e6);
+		report_net(qn, ms, net0, net1, idle0, idle1);
+		printf("TLB STATS: shootdowns=%llu worker_ipis=%llu\n", (unsigned long long)(epoch1 - epoch0),
+		       (unsigned long long)(ipis1 - ipis0));
+		report_flush(fl0, fl1);
+		printf("MEM STATS: free=%.3f GiB\n",
+		       (double)sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1ull << 30));
+	}
+
+	printf("\nTPCH SUMMARY: ok=%d total=%zu ms=%.1f checked=%d matched=%d\n",
+	       ok, queries.size(), total_ms, checked, matched);
+
+	mininet::conn_stats cs = mininet::stats();
+	printf("CONN STATS: requests=%llu reused=%llu\n",
+	       (unsigned long long)cs.requests_served, (unsigned long long)cs.requests_reused);
+
+	bool complete = ok == (int)queries.size() && matched == checked;
+	printf("%s: tpch sf=%s ok=%d/%zu\n", complete ? "COMPLETE" : "INCOMPLETE",
+	       sf_str, ok, queries.size());
+	return complete ? 0 : 1;
+}
+
+// Defined by cov.cc in MININET_COV=1 builds, absent otherwise.
+extern "C" void mininet_cov_dump() __attribute__((weak));
+
 const executable executables[] = {
 	{"sql", run_sql},
 	{"benchmark", duckdb_benchmark_main},
 	{"duckdb", run_cli},
+	{"tpch", run_tpch},
 };
 
 const executable *find_executable(const char *name)
@@ -128,7 +637,55 @@ extern "C" void osv_app_main()
 		printf("miniext: no data disk (%d); continuing without one\n", rc);
 	}
 
+	// Best-effort, like the mount above: an image with no NIC still runs
+	// everything that does not name an http:// or s3:// path. The endpoint
+	// is compiled in -- see the build variables in miniosv/miniosv.mk.
+	// An empty MININET_ADDR resolves the host.
 	std::vector<std::string> words = osv::bootargs_split(osv::bootargs());
+	if (MININET_HOST[0] != '\0') {
+		mininet::config net {};
+		net.host = MININET_HOST;
+		net.address = MININET_ADDR;
+		net.tls = MININET_TLS;
+		net.workers = MININET_WORKERS;
+		net.conns_per_worker = MININET_CONNS;
+		// Leading mininet.<field>=<value> words tune the stack for this boot, ahead of the executable's name.
+		while (!words.empty() && words[0].rfind("mininet.", 0) == 0) {
+			std::string kv = words[0].substr(strlen("mininet."));
+			words.erase(words.begin());
+			auto eq = kv.find('=');
+			std::string k = kv.substr(0, eq);
+			uint32_t v = eq == std::string::npos ? 1 : (uint32_t)strtoul(kv.c_str() + eq + 1, nullptr, 10);
+			if (k == "workers") {
+				net.workers = v;
+			} else if (k == "conns") {
+				net.conns_per_worker = v;
+			} else if (k == "idle_us") {
+				net.idle_us = v;
+			} else if (k == "worker_copies") {
+				net.worker_copies = v;
+			} else if (k == "tls") {
+				net.tls = (int)v;
+			} else {
+				printf("mininet: no setting '%s'\n", k.c_str());
+			}
+		}
+		net_tls = net.tls;
+		printf("mininet: workers %u conns %u idle_us %u worker_copies %u tls %d\n", net.workers,
+		       net.conns_per_worker, net.idle_us, net.worker_copies, net.tls);
+		int nrc = mininet::up(net);
+		if (nrc != mininet::OK) {
+			printf("mininet: %s; continuing without a network\n", mininet::strerror(nrc));
+		} else {
+			printf("mininet: serving %s\n", MININET_HOST);
+		}
+		// Whether signed S3 access is possible at all comes down to this
+		// number: SigV4 refuses a request whose x-amz-date is more than 15
+		// minutes out. TLS working proves far less than it looks, because
+		// certificate validity windows are months wide.
+		printf("clock: unix %llu\n", (unsigned long long)time(nullptr));
+	}
+
 	if (words.empty()) {
 		printf("no boot arguments.\n");
 		usage();
@@ -155,6 +712,9 @@ extern "C" void osv_app_main()
 
 	int status = exe->run(static_cast<int>(argv.size()) - 1, argv.data());
 	printf("\n%s exited with %d\n", exe->name, status);
+	if (mininet_cov_dump) {
+		mininet_cov_dump();
+	}
 
 	// Prints the allocation histogram when the kernel was built with
 	// conf_memory_histogram=1, and nothing otherwise.

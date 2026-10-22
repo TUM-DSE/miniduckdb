@@ -1,0 +1,296 @@
+/*
+ * duckdb::HTTPClient, implemented against modules/mininet.
+ *
+ * This *replaces* httpfs's src/httpfs_httplib_client.cpp, which is excluded
+ * from the build (see miniosv/sources.mk). Nothing in the extension is
+ * modified to make that work: upstream already chooses its HTTP client at
+ * build time -- httplib normally, a stub under Emscripten -- and both of those
+ * files define HTTPFSUtil::InitializeClient. This is a third choice, selected
+ * the same way, so the whole of httpfs above the client boundary compiles
+ * unmodified.
+ *
+ * mininet carries HTTP but does not build it, so this renders the request head
+ * itself. That is the right split: the range arithmetic, the header policy and
+ * (later) SigV4 all belong to httpfs, which already does them.
+ *
+ * Two limits, both deliberate and both loud rather than silent:
+ *
+ *   - One host per image. A worker's usable source ports are derived from the
+ *     peer's address, so mininet is brought up for one endpoint; a request for
+ *     any other host is refused here rather than fetched from the wrong one.
+ *   - A response body has to fit a buffer sized in advance, because that is
+ *     what mininet::get takes. Every read httpfs makes on the hot path is
+ *     ranged, so the size comes from the Range header this function just
+ *     wrote. An unranged GET -- `SET force_download=true` -- has no such size
+ *     and is refused.
+ */
+
+#include "http/httpfs_client.hpp"
+#include "http/http_state.hpp"
+
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
+
+#include "modules/mininet/mininet.hh"
+
+namespace duckdb {
+
+namespace {
+
+//! "https://bucket.s3.eu-north-1.amazonaws.com" -> "bucket.s3...amazonaws.com".
+//! mininet dials an address it was given at startup; the name is only ever the
+//! Host header and the TLS server name.
+string HostOf(const string &proto_host_port) {
+	string s = proto_host_port;
+	auto scheme = s.find("://");
+	if (scheme != string::npos) {
+		s = s.substr(scheme + 3);
+	}
+	auto slash = s.find('/');
+	if (slash != string::npos) {
+		s = s.substr(0, slash);
+	}
+	auto colon = s.find(':');
+	if (colon != string::npos) {
+		s = s.substr(0, colon);
+	}
+	return s;
+}
+
+//! Bytes a `Range: bytes=A-B` header asks for, or 0 if there is no such
+//! header. httpfs writes one for every read on the hot path.
+idx_t RangeLength(const HTTPHeaders &headers) {
+	if (!headers.HasHeader("Range")) {
+		return 0;
+	}
+	const string v = headers.GetHeaderValue("Range");
+	auto eq = v.find('=');
+	auto dash = v.find('-', eq == string::npos ? 0 : eq + 1);
+	if (eq == string::npos || dash == string::npos) {
+		return 0;
+	}
+	try {
+		auto first = std::stoull(v.substr(eq + 1, dash - eq - 1));
+		auto last = std::stoull(v.substr(dash + 1));
+		if (last < first) {
+			return 0;
+		}
+		return static_cast<idx_t>(last - first + 1);
+	} catch (...) {
+		return 0;
+	}
+}
+
+//! Request line, headers, blank line. No explicit `Connection:` header --
+//! HTTP/1.1 defaults to keep-alive, and mininet reuses the socket for the
+//! next request on this slot as long as the peer leaves it Established.
+string RenderHead(const char *method, const string &path, const string &host, const HTTPHeaders &headers,
+                  const HTTPParams &params) {
+	string out = string(method) + " " + path + " HTTP/1.1\r\n";
+	bool have_host = false;
+	for (auto &h : headers) {
+		if (StringUtil::CIEquals(h.first, "Host")) {
+			have_host = true;
+		}
+		out += h.first + ": " + h.second + "\r\n";
+	}
+	if (!have_host) {
+		out += "Host: " + host + "\r\n";
+	}
+	for (auto &h : params.extra_headers) {
+		out += h.first + ": " + h.second + "\r\n";
+	}
+	out += "\r\n";
+	return out;
+}
+
+unique_ptr<HTTPResponse> Failed(int rc, const string &what) {
+	auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+	result->request_error = what + ": " + mininet::strerror(rc);
+	result->success = false;
+	return result;
+}
+
+//! Turn what mininet reports back into the response httpfs expects. Only the
+//! headers something above actually reads are reconstructed -- httpfs asks by
+//! name, and asking for one that was never sent is already handled.
+unique_ptr<HTTPResponse> ToResponse(const mininet::response &r) {
+	auto result = make_uniq<HTTPResponse>(HTTPUtil::ToStatusCode(static_cast<int32_t>(r.status)));
+	if (r.content_length > 0 || r.status == 204) {
+		result->headers.Insert("Content-Length", to_string(r.content_length));
+	}
+	if (r.has_range) {
+		string v = "bytes " + to_string(r.range_first) + "-" + to_string(r.range_last) + "/";
+		v += r.range_total ? to_string(r.range_total) : string("*");
+		result->headers.Insert("Content-Range", v);
+	}
+	if (r.etag[0] != '\0') {
+		result->headers.Insert("ETag", string(r.etag));
+	}
+	if (r.last_modified[0] != '\0') {
+		result->headers.Insert("Last-Modified", string(r.last_modified));
+	}
+	return result;
+}
+
+class MininetHTTPClient : public HTTPClient {
+public:
+	//! Bodies up to this size stay cached on the thread; larger ones are one-off.
+	static constexpr idx_t BODY_CACHE_MAX = 8ull << 20;
+
+	explicit MininetHTTPClient(const string &proto_host_port)
+	    : HTTPClient(proto_host_port), host(HostOf(proto_host_port)) {
+	}
+
+	void Initialize(HTTPParams &) override {
+	}
+
+	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
+		if (auto refusal = CheckHost()) {
+			return refusal;
+		}
+		const idx_t want = RangeLength(info.headers);
+		if (want == 0) {
+			// No Range, so nothing tells us how large the body will be, and
+			// mininet needs the buffer up front. force_download is the setting
+			// that gets here; say so rather than return an empty body.
+			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+			result->request_error =
+			    "mininet: unranged GET is not supported (a body needs a size before it arrives); "
+			    "leave force_download off";
+			result->success = false;
+			return result;
+		}
+
+		const string head = RenderHead("GET", info.path, host, info.headers, info.params);
+		// One body buffer per DuckDB thread, kept from one request to the
+		// next. A fresh allocation of this size is a page-table populate on
+		// the way in and a depopulate with a TLB shootdown on every cpu on
+		// the way out; with 256 threads reading 1 MiB at a time the sampler
+		// found most of them queued behind that shootdown. Not zeroed:
+		// mininet reports how much it wrote.
+		static thread_local unsafe_unique_array<char> body_cache;
+		static thread_local idx_t body_cap = 0;
+		unsafe_unique_array<char> body_once;
+		char *body;
+		// The caller's own buffer when it has one of exactly the Range's size:
+		// then the body lands where it is wanted and is not copied on again.
+		const bool direct = info.body_out != nullptr && info.body_out_len == want;
+		if (direct) {
+			body = char_ptr_cast(info.body_out);
+		} else if (want <= BODY_CACHE_MAX) {
+			if (want > body_cap) {
+				body_cache = make_unsafe_uniq_array_uninitialized<char>(want);
+				body_cap = want;
+			}
+			body = body_cache.get();
+		} else {
+			body_once = make_unsafe_uniq_array_uninitialized<char>(want);
+			body = body_once.get();
+		}
+
+		mininet::response r {};
+		int rc = mininet::get(head.c_str(), head.size(), body, want, &r);
+		if (rc != mininet::OK) {
+			return Failed(rc, "mininet: GET " + info.path);
+		}
+
+		// What DuckDB's prefetch cost model learns latency and bandwidth from.
+		info.bytes_received = static_cast<idx_t>(r.bytes);
+		if (r.ttfb_ns) {
+			info.have_time_to_fst_byte = true;
+			info.time_to_fst_byte_sec = static_cast<double>(r.ttfb_ns) / 1e9;
+		}
+
+		auto response = ToResponse(r);
+		if (static_cast<int>(response->status) >= 400) {
+			// An error body is small and is the useful part; hand it over as
+			// the body rather than through the content handler.
+			response->body = string(body, static_cast<size_t>(r.bytes));
+			if (info.response_handler) {
+				info.response_handler(*response);
+			}
+			return response;
+		}
+		if (info.response_handler && !info.response_handler(*response)) {
+			return response;
+		}
+		if (direct) {
+			// Already in place; the caller's handler would only copy it onto itself.
+			info.body_out_written = static_cast<idx_t>(r.bytes);
+		} else if (info.content_handler && r.bytes > 0) {
+			info.content_handler(const_data_ptr_cast(body), static_cast<idx_t>(r.bytes));
+		} else {
+			response->body = string(body, static_cast<size_t>(r.bytes));
+		}
+		return response;
+	}
+
+	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
+		if (auto refusal = CheckHost()) {
+			return refusal;
+		}
+		const string head = RenderHead("HEAD", info.path, host, info.headers, info.params);
+		mininet::response r {};
+		// A HEAD has no body, so there is nowhere for one to go.
+		int rc = mininet::get(head.c_str(), head.size(), nullptr, 0, &r);
+		if (rc != mininet::OK) {
+			return Failed(rc, "mininet: HEAD " + info.path);
+		}
+		return ToResponse(r);
+	}
+
+	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
+		return NotImplemented("PUT");
+	}
+	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
+		return NotImplemented("DELETE");
+	}
+	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
+		return NotImplemented("POST");
+	}
+	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
+		return NotImplemented("OPTIONS");
+	}
+
+private:
+	//! mininet serves one endpoint. Fetching from the wrong host would look
+	//! like data corruption much later, so refuse here.
+	unique_ptr<HTTPResponse> CheckHost() const {
+		const char *up = mininet::host();
+		if (!up) {
+			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+			result->request_error = "mininet is not up";
+			result->success = false;
+			return result;
+		}
+		if (host != up) {
+			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+			result->request_error = StringUtil::Format(
+			    "mininet serves \"%s\" and cannot reach \"%s\": one endpoint per image", up, host);
+			result->success = false;
+			return result;
+		}
+		return nullptr;
+	}
+
+	static unique_ptr<HTTPResponse> NotImplemented(const char *method) {
+		auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+		result->request_error = string("mininet: ") + method + " is not implemented";
+		result->success = false;
+		return result;
+	}
+
+	string host;
+};
+
+} // namespace
+
+//! The symbol httpfs_httplib_client.cpp would have defined. Selecting a client
+//! by which file is compiled is upstream's own mechanism; this is a third
+//! choice alongside httplib and the WASM stub.
+unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
+	return make_uniq<MininetHTTPClient>(proto_host_port);
+}
+
+} // namespace duckdb

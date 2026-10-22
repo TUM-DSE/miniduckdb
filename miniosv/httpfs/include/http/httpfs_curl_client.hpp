@@ -1,0 +1,122 @@
+#pragma once
+
+#include <cerrno>
+#include <curl/curl.h>
+#include <utility>
+
+#include "http/httpfs_client.hpp"
+
+namespace duckdb {
+class HTTPLogger;
+class FileOpener;
+struct FileOpenerInfo;
+class HTTPState;
+class HTTPFSCurlClient;
+
+//! Returns the CURLOPT_SSLVERSION value that pins the minimum TLS version to 1.2,
+//! leaving the maximum at curl's default. Exposed for unit testing.
+long GetCurlMinTLSVersion(); // NOLINT(google-runtime-int): curl option values are long
+
+class CURLURLHandle {
+private:
+	explicit CURLURLHandle(CURLU *handle_p);
+
+public:
+	CURLURLHandle();
+	CURLURLHandle(const CURLURLHandle &other);
+	~CURLURLHandle();
+
+	CURLURLHandle &operator=(const CURLURLHandle &) = delete;
+
+public:
+	CURLU *Get() {
+		return handle;
+	}
+
+private:
+	CURLU *handle;
+};
+
+class CURLHandle {
+private:
+	CURLHandle();
+
+public:
+	explicit CURLHandle(bool use_native_ca);
+	~CURLHandle();
+
+public:
+	operator CURL *() { // NOLINT(google-explicit-constructor)
+		return curl;
+	}
+	CURLcode Execute() {
+		errno = 0;
+		auto result = curl_easy_perform(curl);
+		execute_errno = errno;
+		return result;
+	}
+	//! errno as the last transfer left it, telling apart failures curl reports by the step that failed.
+	int GetExecuteErrno() const {
+		return execute_errno;
+	}
+	template <class T>
+	void SetOption(CURLoption option, T value) {
+		auto result = curl_easy_setopt(curl, option, value);
+		if (result != CURLE_OK) {
+			throw IOException("Failed to set curl option %d: %s", static_cast<int>(option), curl_easy_strerror(result));
+		}
+	}
+	uint16_t GetResponseCode();
+
+private:
+	CURL *curl = nullptr;
+	int execute_errno = 0;
+};
+
+class CURLRequestHeaders {
+	friend class HTTPFSCurlClient;
+
+public:
+	CURLRequestHeaders() = default;
+	CURLRequestHeaders(CURLRequestHeaders &&other) noexcept : headers(other.headers) {
+		other.headers = nullptr;
+	}
+	CURLRequestHeaders &operator=(CURLRequestHeaders &&other) noexcept {
+		std::swap(headers, other.headers);
+		return *this;
+	}
+	CURLRequestHeaders(const CURLRequestHeaders &) = delete;
+	CURLRequestHeaders &operator=(const CURLRequestHeaders &) = delete;
+	~CURLRequestHeaders() {
+		if (headers) {
+			curl_slist_free_all(headers);
+		}
+		headers = nullptr;
+	}
+
+private:
+	curl_slist *Get() const {
+		return headers;
+	}
+
+public:
+	void Add(const string &header) {
+		auto new_headers = curl_slist_append(headers, header.c_str());
+		if (!new_headers) {
+			throw OutOfMemoryException("Failed to allocate curl request headers");
+		}
+		headers = new_headers;
+	}
+	void Add(const string &name, const string &value) {
+		if (HTTPFSHeaderValue::IsEmpty(value)) {
+			Add(name + ";");
+		} else {
+			Add(name + ": " + value);
+		}
+	}
+
+private:
+	curl_slist *headers = nullptr;
+};
+
+} // namespace duckdb

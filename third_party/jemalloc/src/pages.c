@@ -821,7 +821,13 @@ pages_boot(void) {
 		mmap_flags |= MAP_NORESERVE;
 	}
 #  endif
-#elif defined(__NetBSD__)
+#elif defined(__NetBSD__) || defined(__OSV__)
+	/*
+	 * miniOSv demand-faults anonymous memory and has no MAP_FIXED, so a
+	 * "commit" by remapping cannot work; with os_overcommits false every
+	 * grown extent is mapped PROT_NONE, fails to commit, sits unusable in
+	 * the retained set and each allocation falls back to a fresh mmap.
+	 */
 	os_overcommits = true;
 #else
 	os_overcommits = false;
