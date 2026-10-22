@@ -125,6 +125,15 @@ unique_ptr<FileHandle> LocalFileSystem::OpenFile(const string &path_p, FileOpenF
 	return std::move(handle);
 }
 
+unique_ptr<MemoryMappedFile> LocalFileSystem::MemoryMapFile(const OpenFileInfo &path, FileOpenFlags flags,
+                                                            const MMapOptions &options,
+                                                            optional_ptr<FileOpener> opener) {
+	// mmap() on miniOSv is anonymous-only -- libc/mman.cc refuses a file with
+	// ENODEV -- and miniext has no mapping of its own, so there is nothing to
+	// map a file into. DuckDB only reaches here for callers that ask for it.
+	throw NotImplementedException("miniext: memory-mapping a file is not supported");
+}
+
 void LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	int64_t got = miniext::pread(AsMiniext(handle).file, buffer, static_cast<size_t>(nr_bytes), location);
 	if (got < 0) {
@@ -173,6 +182,12 @@ int64_t LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_byte
 
 //! Punching holes is not implemented; the base class treats false as "the range
 //! still holds its old contents", which is true.
+FileWriteMode LocalFileSystem::GetWriteMode(FileHandle &handle) {
+	// Writes carry their own offset (miniext::pwrite), so they need no ordering
+	// and may overlap, as on the POSIX backend for a regular file.
+	return FileWriteMode::POSITIONAL;
+}
+
 bool LocalFileSystem::Trim(FileHandle &handle, idx_t offset_bytes, idx_t length_bytes) {
 	return false;
 }
@@ -205,6 +220,32 @@ FileMetadata LocalFileSystem::Stats(FileHandle &handle) {
 	return result;
 }
 
+optional<FileMetadata> LocalFileSystem::GetStatsIfExists(const OpenFileInfo &file,
+                                                        optional_ptr<FileOpener> opener) {
+	if (file.path.empty()) {
+		return nullopt;
+	}
+	const string path = Absolute(file.path);
+	FileMetadata result;
+	result.last_modification_time = timestamp_t(0);
+	if (miniext::is_directory(path.c_str())) {
+		result.file_size = 0;
+		result.file_type = FileType::FILE_TYPE_DIR;
+		return result;
+	}
+	uint64_t size = 0;
+	int rc = miniext::file_size(path.c_str(), &size);
+	if (rc < 0) {
+		if (rc == -ENOENT || rc == -ENOTDIR) {
+			return nullopt; // the point of the call: absent is not an error
+		}
+		ThrowIO("stat", path, rc);
+	}
+	result.file_size = static_cast<int64_t>(size);
+	result.file_type = FileType::FILE_TYPE_REGULAR;
+	return result;
+}
+
 void LocalFileSystem::Truncate(FileHandle &handle, int64_t new_size) {
 	int rc = miniext::truncate(AsMiniext(handle).file, static_cast<uint64_t>(new_size));
 	if (rc < 0) {
@@ -225,6 +266,30 @@ void LocalFileSystem::CreateDirectory(const string &directory, optional_ptr<File
 	if (rc < 0 && rc != -EEXIST) {
 		ThrowIO("mkdir", path, rc);
 	}
+}
+
+bool LocalFileSystem::CreateDirectoryExtended(const string &directory, const CreateDirectoryOptions &options,
+                                              optional_ptr<FileOpener> opener) {
+	if (options.mode == CreateDirectoryMode::RECURSIVE) {
+		// The base walks the path and calls back into CreateDirectory.
+		return FileSystem::CreateDirectoryExtended(directory, options, opener);
+	}
+	if (options.mode != CreateDirectoryMode::SINGLE) {
+		throw InternalException("Unknown CreateDirectoryMode");
+	}
+	const string path = Absolute(directory);
+	int rc = miniext::mkdir(path.c_str());
+	if (rc == 0) {
+		return true; // created by this call, which is what the result reports
+	}
+	if (rc == -EEXIST && miniext::is_directory(path.c_str())) {
+		return false;
+	}
+	ThrowIO("mkdir", path, rc);
+}
+
+void LocalFileSystem::CreateDirectoriesRecursive(const string &path, optional_ptr<FileOpener> opener) {
+	FileSystem::CreateDirectoriesRecursive(path, opener);
 }
 
 void LocalFileSystem::RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener) {
@@ -249,6 +314,26 @@ void LocalFileSystem::RemoveDirectory(const string &directory, optional_ptr<File
 	if (rc < 0) {
 		ThrowIO("rmdir", path, rc);
 	}
+}
+
+bool LocalFileSystem::RemoveDirectoryExtended(const string &directory, const RemoveDirectoryOptions &options,
+                                              optional_ptr<FileOpener> opener) {
+	const string path = Absolute(directory);
+	if (options.mode == RemoveDirectoryMode::RECURSIVE) {
+		RemoveDirectory(directory, opener);
+		return !miniext::is_directory(path.c_str());
+	}
+	if (options.mode != RemoveDirectoryMode::SINGLE) {
+		throw InternalException("Unknown RemoveDirectoryMode");
+	}
+	int rc = miniext::rmdir(path.c_str());
+	if (rc == 0) {
+		return true;
+	}
+	if (rc == -ENOENT || rc == -ENOTEMPTY || rc == -EEXIST) {
+		return false; // missing or non-empty: the caller decides what to do
+	}
+	ThrowIO("rmdir", path, rc);
 }
 
 void LocalFileSystem::MoveFile(const string &source, const string &target,
@@ -280,6 +365,17 @@ void LocalFileSystem::FileSync(FileHandle &handle) {
 	int rc = miniext::sync(AsMiniext(handle).file);
 	if (rc < 0) {
 		ThrowIO("sync", handle.path, rc);
+	}
+}
+
+void LocalFileSystem::AbortFileWrite(FileHandle &handle) {
+	// An output file the caller created exclusively is theirs to remove; one it
+	// opened over an existing file is not. Mirrors the POSIX backend.
+	const bool remove_path = handle.GetFlags().ExclusiveCreate();
+	const string path = handle.GetPath();
+	handle.Close();
+	if (remove_path) {
+		miniext::unlink(Absolute(path).c_str()); // best effort, as upstream
 	}
 }
 

@@ -28,6 +28,9 @@
 // The benchmark runner's main(), renamed by miniosv.mk. C++ linkage, because
 // after -Dmain=... it is an ordinary function.
 int duckdb_benchmark_main(int argc, char **argv);
+
+// miniosv/static_extensions.cc; upstream's generated loader has this name.
+extern "C" int32_t duckdb_register_static_extensions(void);
 //! The CLI's main() takes const char **, hence the wrapper below.
 int duckdb_shell_main(int argc, const char **argv);
 
@@ -114,6 +117,11 @@ void usage()
 extern "C" void osv_app_main()
 {
 	printf("\n######## DuckDB on miniOSv ########\n\n");
+
+	// Before any database is opened: see miniosv/static_extensions.cc.
+	if (duckdb_register_static_extensions() != 0) {
+		printf("duckdb: a linked-in extension failed to register\n");
+	}
 
 	int rc = miniext::mount(DATA_NVME_ID, MOUNT_POINT);
 	if (rc < 0) {

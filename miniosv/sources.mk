@@ -4,8 +4,8 @@
 # directories they need. Paths are relative to this tree's root;
 # miniosv.mk prefixes them with wherever the tree sits.
 
-duckdb-version   := v2.0.0-dev71159
-duckdb-source-id := 0ddff1a0ca
+duckdb-version   := v2.0.0-dev88633
+duckdb-source-id := 57396cdc25
 
 duckdb-include-dirs :=
 duckdb-include-dirs += src/include
@@ -47,6 +47,7 @@ duckdb-include-dirs += third_party/thrift
 duckdb-include-dirs += third_party/snappy
 duckdb-include-dirs += third_party/lz4
 duckdb-include-dirs += third_party/brotli
+duckdb-include-dirs += test/extension/debug_fs/include
 duckdb-include-dirs += benchmark/include
 duckdb-include-dirs += test/include
 duckdb-include-dirs += third_party/catch
@@ -54,7 +55,7 @@ duckdb-include-dirs += tools/shell/include
 duckdb-include-dirs += tools/shell/linenoise/include
 duckdb-include-dirs += extension/autocomplete/include
 
-# --- DuckDB engine and its third-party dependencies (1793 files)
+# --- DuckDB engine and its third-party dependencies (1789 files)
 duckdb-sources :=
 duckdb-sources += src/catalog/catalog.cpp
 duckdb-sources += src/catalog/catalog_entry/aggregate_function_catalog_entry.cpp
@@ -868,9 +869,7 @@ duckdb-sources += src/main/error_manager.cpp
 duckdb-sources += src/main/extension/extension_alias.cpp
 duckdb-sources += src/main/extension/extension_helper.cpp
 duckdb-sources += src/main/extension/extension_install.cpp
-duckdb-sources += src/main/extension/extension_install_dynamic.cpp
 duckdb-sources += src/main/extension/extension_load.cpp
-duckdb-sources += src/main/extension/extension_load_dynamic.cpp
 duckdb-sources += src/main/extension/extension_loader.cpp
 duckdb-sources += src/main/extension/extension_repository_manager.cpp
 duckdb-sources += src/main/extension/external_extension_provider.cpp
@@ -881,7 +880,6 @@ duckdb-sources += src/main/extension_install_info.cpp
 duckdb-sources += src/main/extension_manager.cpp
 duckdb-sources += src/main/external_resource_type_registry.cpp
 duckdb-sources += src/main/external_resources_manager.cpp
-duckdb-sources += src/main/http/http_client_httplib.cpp
 duckdb-sources += src/main/http/http_client_pool.cpp
 duckdb-sources += src/main/http/http_retry_budget.cpp
 duckdb-sources += src/main/http/http_transport_config.cpp
@@ -1848,7 +1846,6 @@ duckdb-sources += third_party/jemalloc/src/tsd.c
 duckdb-sources += third_party/jemalloc/src/util.c
 duckdb-sources += third_party/jemalloc/src/witness.c
 duckdb-sources += third_party/jemalloc/src/zone.c
-duckdb-sources += extension/loader/static_extension_autoregister.cpp
 
 # --- extension: core_functions (120 files)
 
@@ -2175,6 +2172,12 @@ duckdb-sources += benchmark/micro/parser.cpp
 duckdb-sources += benchmark/micro/storage.cpp
 duckdb-sources += benchmark/micro/string_serialize.cpp
 duckdb-sources += benchmark/tpch/startup.cpp
+
+# --- benchmark runner: debug_fs (3 files)
+
+duckdb-sources += test/extension/debug_fs/debug_file_system.cpp
+duckdb-sources += test/extension/debug_fs/debug_fs_extension.cpp
+duckdb-sources += test/extension/debug_fs/io_latency_model.cpp
 
 # --- CLI: tools/shell (21 files)
 

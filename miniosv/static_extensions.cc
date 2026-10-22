@@ -1,63 +1,45 @@
 /*
  * The extensions linked into the image.
  *
- * Upstream generates this file from CMake (extension/generated_extension_loader
- * .cpp.in) and falls back to extension/loader/dummy_static_extension_loader.cpp
- * -- a no-op -- when nothing is linked. We do neither: this is the real thing,
- * hand-written, listing what miniOSv builds in.
+ * v2.0 loads a linked-in extension through a registry: each one describes
+ * itself to duckdb_register_static_extension, DBConfig copies the registry into
+ * linked_extensions, and ExtensionHelper::LoadAllExtensions -- which
+ * DuckDB::DuckDB calls during construction, config.options.load_extensions
+ * being on by default -- walks that list. So opening a database still loads all
+ * of them; this file only has to do the registering.
+ *
+ * Upstream generates an equivalent file from CMake
+ * (extension/loader/static_extension_loader.c.in) and leans on a static
+ * initialiser in extension/loader/static_extension_autoregister.cpp to call it
+ * before main. The kernel defers the application's constructors, so that file
+ * is left out of the build (miniosv/gen-sources.py) and main.cc calls this
+ * explicitly instead, before it opens anything. The name is upstream's, so
+ * anything else that expects the generated loader finds it.
  *
  * It matters that these are static. dlopen always fails on miniOSv
- * (libc/dlfcn.cc), so a runtime `LOAD parquet` can never work; anything we want
- * has to be here. DuckDB::DuckDB calls LoadAllExtensions during construction
- * when config.options.load_extensions is set, which is the default, so simply
- * opening a database registers all of them.
+ * (libc/dlfcn.cc), so a runtime `LOAD parquet` can never work -- and with the
+ * loadable-extensions sources left out of the build, DuckDB's own no-loader
+ * provider says so with a PermissionException. Anything we want has to be here.
  */
 
-#include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb_static_extension.h"
 
 #include "core_functions_extension.hpp"
 #include "parquet_extension.hpp"
 #include "tpch_extension.hpp"
 #include "autocomplete_extension.hpp"
 
-namespace duckdb {
-
-void ExtensionHelper::LoadAllExtensions(DuckDB &db)
+extern "C" int32_t duckdb_register_static_extensions(void)
 {
+	using namespace duckdb;
+
+	int32_t result = 0;
 	// core_functions is not optional in practice: without it TPC-H fails on
 	// sum/avg/extract, and so does most non-trivial SQL.
-	LoadExtension(db, "core_functions");
-	LoadExtension(db, "parquet");
-	LoadExtension(db, "tpch");
-	// The CLI's tab completion.
-	LoadExtension(db, "autocomplete");
+	result |= duckdb_register_static_extension(&StaticExtensionDescriber<CoreFunctionsExtension>::Describe);
+	result |= duckdb_register_static_extension(&StaticExtensionDescriber<ParquetExtension>::Describe);
+	result |= duckdb_register_static_extension(&StaticExtensionDescriber<TpchExtension>::Describe);
+	result |= duckdb_register_static_extension(&StaticExtensionDescriber<AutocompleteExtension>::Describe);
+	return result;
 }
-
-//! Named lookup, for callers that ask for an extension by string (the benchmark
-//! runner's `require` directive). It has to do the registering, not just report
-//! availability: a benchmark opens its database with load_extensions off, so
-//! LoadAllExtensions never ran. LoadStaticExtension is idempotent.
-ExtensionLoadResult ExtensionHelper::LoadExtension(DuckDB &db, const std::string &extension)
-{
-	if (extension == "core_functions") {
-		db.LoadStaticExtension<CoreFunctionsExtension>();
-	} else if (extension == "parquet") {
-		db.LoadStaticExtension<ParquetExtension>();
-	} else if (extension == "tpch") {
-		db.LoadStaticExtension<TpchExtension>();
-	} else if (extension == "autocomplete") {
-		db.LoadStaticExtension<AutocompleteExtension>();
-	} else {
-		return ExtensionLoadResult::NOT_LOADED;
-	}
-	return ExtensionLoadResult::LOADED_EXTENSION;
-}
-
-vector<string> ExtensionHelper::LoadedExtensionTestPaths()
-{
-	// Used only by upstream's test harness to find extension binaries on disk.
-	// Everything here is compiled in, so there are no paths to report.
-	return {};
-}
-
-} // namespace duckdb

@@ -25,13 +25,18 @@ duckdb-sources      := $(addprefix $(duckdb-dir)/,$(duckdb-sources))
 
 # --- flags ------------------------------------------------------------------
 
-# The include path DuckDB expects, plus our shim directory ahead of it.
+# The include path DuckDB expects, with both shim directories ahead of it.
+# Both, and in this order, because the generated list is not guaranteed to
+# leave room for them: v2.0's amalgamation.list_include_dirs() returns
+# third_party/jemalloc/include, and a shim only shadows a real header if its
+# directory comes first.
 duckdb-includes := -I$(duckdb-miniosv)/stubs \
+                   -I$(duckdb-miniosv)/stubs/jemalloc \
                    $(addprefix -I,$(duckdb-include-dirs))
 
-# jemalloc's own headers, and a shadowing config header (see stubs/jemalloc).
-jemalloc-includes := -I$(duckdb-miniosv)/stubs/jemalloc \
-                     -I$(duckdb-dir)/third_party/jemalloc/include
+# jemalloc's own headers; the shadowing config header above pulls them in with
+# #include_next (see stubs/jemalloc).
+jemalloc-includes := -I$(duckdb-dir)/third_party/jemalloc/include
 
 # The kernel builds -Wall -Werror; DuckDB and its vendored third-party trees do
 # not, and are not ours to fix. Warnings are off for these objects only.
@@ -47,7 +52,16 @@ jemalloc-includes := -I$(duckdb-miniosv)/stubs/jemalloc \
 # DUCKDB_VERSION / DUCKDB_SOURCE_ID: upstream's CMake derives these from git
 # and src/function/table/version/pragma_version.cpp does not compile without
 # them. sources.mk carries the captured values.
-duckdb-defines := -DDUCKDB_DISABLE_BUILTIN_HTTPLIB \
+# -DDUCKDB_FORCE_ASSERT: the kernel's assert.h keeps assert() live whenever
+#  _KERNEL is defined, which it is for every object here, so NDEBUG cannot
+#  switch DuckDB's asserts off. Left alone, assert.hpp takes its "not a debug
+#  build" branch, where D_ASSERT is plain assert() -- live -- while
+#  D_ASSERT_IS_ENABLED stays undefined, so helpers guarded by it are not
+#  compiled; v2.0's src/common/sort/hashed_sort.cpp uses one inside a
+#  D_ASSERT. This takes the asserts-enabled branch instead, which is
+#  self-consistent and routes them through DuckDBAssertInternal.
+duckdb-defines := -DDUCKDB_FORCE_ASSERT \
+                  -DDUCKDB_DISABLE_BUILTIN_HTTPLIB \
                   -DDUCKDB_ENABLE_JEMALLOC \
                   -DDUCKDB_VERSION=\"$(duckdb-version)\" \
                   -DDUCKDB_SOURCE_ID=\"$(duckdb-source-id)\"
@@ -119,7 +133,8 @@ $(out)/$(duckdb-dir)/benchmark/benchmark_runner.o: CXXFLAGS += \
 
 # The CLI ships its own main() too. Its signature takes const char **, so
 # main.cc wraps it rather than calling it directly.
-$(out)/$(duckdb-dir)/tools/shell/shell.o: CXXFLAGS += -Dmain=duckdb_shell_main
+# v2.0 split the CLI's main() out into shell_main.cpp.
+$(out)/$(duckdb-dir)/tools/shell/shell_main.o: CXXFLAGS += -Dmain=duckdb_shell_main
 
 # The miniosv/ sources use DuckDB's headers but are ours, so they build with
 # the same include path and shim as the engine.

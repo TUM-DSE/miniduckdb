@@ -59,6 +59,12 @@ JEMALLOC_DIR = "third_party/jemalloc/src"
 # FileSystem, so they live on the data disk rather than in the image.
 BENCHMARK_DIRS = ["benchmark"]
 
+# v2.0's benchmark/interpreted_benchmark.cpp statically loads the debug_fs test
+# extension, so benchmarks can inject artificial I/O latency (SET GLOBAL
+# debug_fs_delay_mean_ms=...). It lives under test/, not extension/, and brings
+# its own include directory.
+BENCHMARK_EXTENSIONS = ["test/extension/debug_fs"]
+
 # interpreted_benchmark.cpp uses exactly one function from the test helpers,
 # DeleteDatabase(). Building test/helpers/test_helpers.cpp to get it drags in
 # the whole test framework (TestConfiguration, catch's main, duckdb::getpid),
@@ -75,6 +81,26 @@ SHELL_SKIP = ("tools/shell/tests",)
 EXCLUDED = {
     "utf8proc_data.cpp",
     "dummy_static_extension_loader.cpp",
+    # Calls the generated loader from a static initialiser. We define
+    # duckdb_register_static_extensions() in miniosv/static_extensions.cc and
+    # main.cc calls it at a known point, the kernel having deferred the
+    # application's constructors anyway, so this would only register twice.
+    "static_extension_autoregister.cpp",
+    # Installing and loading external extensions. dlopen always fails here, and
+    # upstream drops these two in the same case (package_build.py:
+    # `[] if extension_load else loadable_extensions_sources`). Without them
+    # no provider is registered, and the base ExternalExtensionProvider that
+    # DatabaseInstance installs instead reports SupportsExternalExtensions()
+    # false and throws PermissionException from Install/OpenLibrary, so LOAD
+    # and INSTALL fail with "this build does not link the loadable_extensions
+    # library" rather than dying in dlopen.
+    "extension_install_dynamic.cpp",
+    "extension_load_dynamic.cpp",
+    # The built-in HTTP client. We pass -DDUCKDB_DISABLE_BUILTIN_HTTPLIB, and
+    # upstream drops this source in exactly that case (package_build.py:
+    # `if not builtin_httplib`). It includes third_party/httplib/httplib.hpp,
+    # which wants arpa/inet.h.
+    "http_client_httplib.cpp",
     # Only compiled when OVERRIDE_NEW_DELETE is on, which DuckDB leaves off
     # (third_party/jemalloc/CMakeLists.txt:73-74). Compiling it anyway fails
     # with "OVERRIDE_NEW_DELETE not properly defined" -- and we do not want
@@ -118,6 +144,8 @@ def main():
     groups.append(("jemalloc (duckdb_je_ prefixed)", walk(JEMALLOC_DIR)))
     for d in BENCHMARK_DIRS:
         groups.append((f"benchmark runner: {d}", walk(d)))
+    for d in BENCHMARK_EXTENSIONS:
+        groups.append((f"benchmark runner: {os.path.basename(d)}", walk(d)))
     for d in SHELL_DIRS:
         srcs = [s for s in walk(d) if not s.startswith(SHELL_SKIP)]
         groups.append((f"CLI: {d}", srcs))
@@ -136,7 +164,8 @@ def main():
         if os.path.isdir(os.path.join(ROOT, tp)):
             include_dirs.append(tp)
     # The benchmark runner's own headers, and the test helpers it borrows.
-    for d in ["benchmark/include", "test/include", "third_party/catch",
+    for d in [f"{e}/include" for e in BENCHMARK_EXTENSIONS] + \
+             ["benchmark/include", "test/include", "third_party/catch",
               "tools/shell/include", "tools/shell/linenoise/include",
               "extension/autocomplete/include"]:
         if os.path.isdir(os.path.join(ROOT, d)):
