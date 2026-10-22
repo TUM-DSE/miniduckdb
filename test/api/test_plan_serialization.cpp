@@ -10,23 +10,23 @@
 #include <set>
 
 using namespace duckdb;
-using namespace std;
 
 static void test_helper(string sql, duckdb::vector<string> fixtures = duckdb::vector<string>()) {
 	DuckDB db;
 	Connection con(db);
 
 	for (const auto &fixture : fixtures) {
-		con.SendQuery(fixture);
+		con.Query(fixture);
 	}
 
-	Parser p;
+	Parser p(*con.context);
 	p.ParseQuery(sql);
 
 	for (auto &statement : p.statements) {
 		con.context->transaction.BeginTransaction();
 		// Should that be the default "ToString"?
-		string statement_sql(statement->query.c_str() + statement->stmt_location, statement->stmt_length);
+		string statement_sql(statement->query.c_str() + statement->stmt_location.offset,
+		                     statement->stmt_location.length);
 		Planner planner(*con.context);
 		planner.CreatePlan(std::move(statement));
 		auto plan = std::move(planner.plan);
@@ -49,16 +49,17 @@ static void test_helper_multi_db(string sql, duckdb::vector<string> fixtures = d
 	REQUIRE_NO_FAIL(con.Query("ATTACH DATABASE ':memory:' AS new_db;"));
 
 	for (const auto &fixture : fixtures) {
-		con.SendQuery(fixture);
+		con.Query(fixture);
 	}
 
-	Parser p;
+	Parser p(*con.context);
 	p.ParseQuery(sql);
 
 	for (auto &statement : p.statements) {
 		con.context->transaction.BeginTransaction();
 		// Should that be the default "ToString"?
-		string statement_sql(statement->query.c_str() + statement->stmt_location, statement->stmt_length);
+		string statement_sql(statement->query.c_str() + statement->stmt_location.offset,
+		                     statement->stmt_location.length);
 		Planner planner(*con.context);
 		planner.CreatePlan(std::move(statement));
 		auto plan = std::move(planner.plan);
@@ -130,15 +131,15 @@ TEST_CASE("Test logical_update", "[serialization]") {
 //	test_helper("PREPARE v1 AS SELECT 42");
 //}
 
-TEST_CASE("Test logical_simple with DROP", "[serialization]") {
+TEST_CASE("Test logical_drop", "[serialization]") {
 	test_helper("DROP TABLE tbl", {"CREATE TABLE tbl (foo INTEGER)"});
 }
 
-TEST_CASE("Test logical_simple with ALTER", "[serialization]") {
+TEST_CASE("Test logical_alter", "[serialization]") {
 	test_helper("ALTER TABLE tbl ADD COLUMN bar INTEGER", {"CREATE TABLE tbl (foo INTEGER)"});
 }
 
-TEST_CASE("Test logical_simple with LOAD", "[serialization]") {
+TEST_CASE("Test logical_load", "[serialization]") {
 	test_helper("LOAD foo");
 }
 
