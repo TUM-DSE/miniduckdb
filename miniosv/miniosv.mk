@@ -6,13 +6,15 @@
 # errors name the file they came from. miniosv/sources.mk holds the generated
 # list; regenerate it with miniosv/gen-sources.py after a version bump.
 #
-# Nothing outside miniosv/ is modified -- the DuckDB tree is upstream v1.5.5
-# unchanged. Everything miniOSv needs is a shim here, put on the include path
-# ahead of the real headers or force-included.
+# The tree is upstream v2.0.0 but for a few guards where a shim cannot reach
+# (printer.cpp, query_profiler, tools/shell). Everything else miniOSv needs is
+# a shim here, put on the include path ahead of the real headers or
+# force-included.
 
-# Where this tree sits under the miniOSv root, derived from this file's own
-# path: app/miniduckdb when built in place, app when staged there. Must come
-# before any include, which would move MAKEFILE_LIST's last word.
+# Where this tree sits from the miniOSv root's point of view, derived from this
+# file's own path: an absolute path when the kernel is built from here, app
+# when staged there. Must come before any include, which would move
+# MAKEFILE_LIST's last word.
 duckdb-miniosv := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
 duckdb-dir     := $(patsubst %/,%,$(dir $(duckdb-miniosv)))
 
