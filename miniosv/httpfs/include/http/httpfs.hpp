@@ -66,10 +66,9 @@ public:
 	const HTTPObjectVersion &GetObjectVersion() const;
 
 	//! Record a completed range request in the network throughput estimate
-	void RecordNetworkSample(double total_seconds, idx_t bytes, bool sample_has_ttfb, double ttfb_seconds)
-	    DUCKDB_EXCLUDES(network_estimator_lock);
+	void RecordNetworkSample(double total_seconds, idx_t bytes, bool sample_has_ttfb, double ttfb_seconds);
 	//! Expose the network estimate to the prefetch cost model
-	bool GetNetworkThroughputEstimate(NetworkThroughputEstimate &result) DUCKDB_EXCLUDES(network_estimator_lock);
+	bool GetNetworkThroughputEstimate(NetworkThroughputEstimate &result);
 	void ApplyCachePolicy(const HTTPResponse &response, timestamp_t request_time, timestamp_t response_time)
 	    DUCKDB_EXCLUDES(cache_policy_lock);
 	optional<timestamp_t> GetCacheValidUntil() const DUCKDB_EXCLUDES(cache_policy_lock);
@@ -137,11 +136,11 @@ private:
 	HTTPReadConfig read_config;
 	bool read_config_initialized = false;
 
-	//! Network throughput estimate
-	mutable annotated_mutex network_estimator_lock;
-	double tp_latency_seconds DUCKDB_GUARDED_BY(network_estimator_lock) = 0;
-	double tp_bandwidth_bps DUCKDB_GUARDED_BY(network_estimator_lock) = 0;
-	idx_t tp_sample_count DUCKDB_GUARDED_BY(network_estimator_lock) = 0;
+	//! Network throughput estimate. Every scan thread updates it after each request, so it takes no lock: two
+	//! samples racing may lose one, which a moving average does not miss.
+	atomic<double> tp_latency_seconds {0};
+	atomic<double> tp_bandwidth_bps {0};
+	atomic<idx_t> tp_sample_count {0};
 	static constexpr idx_t MIN_BANDWIDTH_SAMPLE_BYTES = 1 << 16;
 };
 

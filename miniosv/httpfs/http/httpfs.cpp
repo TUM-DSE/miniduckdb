@@ -360,30 +360,33 @@ void HTTPFileHandle::RecordNetworkSample(double total_seconds, idx_t bytes, bool
 	if (!(total_seconds > 0)) {
 		return;
 	}
-	annotated_lock_guard<annotated_mutex> guard(network_estimator_lock);
-	const idx_t n = tp_sample_count + 1;
+	const idx_t n = tp_sample_count.load(std::memory_order_relaxed) + 1;
 	const double alpha = MaxValue<double>(0.2, 1.0 / static_cast<double>(n));
 
 	if (sample_has_ttfb && ttfb_seconds > 0) {
-		tp_latency_seconds =
-		    tp_latency_seconds <= 0 ? ttfb_seconds : alpha * ttfb_seconds + (1.0 - alpha) * tp_latency_seconds;
+		const double latency = tp_latency_seconds.load(std::memory_order_relaxed);
+		tp_latency_seconds.store(latency <= 0 ? ttfb_seconds : alpha * ttfb_seconds + (1.0 - alpha) * latency,
+		                         std::memory_order_relaxed);
 	}
 
 	const double transfer_seconds = sample_has_ttfb ? (total_seconds - ttfb_seconds) : total_seconds;
 	if (bytes >= MIN_BANDWIDTH_SAMPLE_BYTES && transfer_seconds > 0) {
 		const double bandwidth = static_cast<double>(bytes) / transfer_seconds;
-		tp_bandwidth_bps = tp_bandwidth_bps <= 0 ? bandwidth : alpha * bandwidth + (1.0 - alpha) * tp_bandwidth_bps;
+		const double current = tp_bandwidth_bps.load(std::memory_order_relaxed);
+		tp_bandwidth_bps.store(current <= 0 ? bandwidth : alpha * bandwidth + (1.0 - alpha) * current,
+		                       std::memory_order_relaxed);
 	}
-	tp_sample_count = n;
+	tp_sample_count.store(n, std::memory_order_relaxed);
 }
 
 bool HTTPFileHandle::GetNetworkThroughputEstimate(NetworkThroughputEstimate &result) {
-	annotated_lock_guard<annotated_mutex> guard(network_estimator_lock);
-	if (tp_sample_count == 0 || tp_latency_seconds <= 0 || tp_bandwidth_bps <= 0) {
+	const double latency = tp_latency_seconds.load(std::memory_order_relaxed);
+	const double bandwidth = tp_bandwidth_bps.load(std::memory_order_relaxed);
+	if (tp_sample_count.load(std::memory_order_relaxed) == 0 || latency <= 0 || bandwidth <= 0) {
 		return false;
 	}
-	result.latency_seconds = tp_latency_seconds;
-	result.bandwidth_bytes_per_s = tp_bandwidth_bps;
+	result.latency_seconds = latency;
+	result.bandwidth_bytes_per_s = bandwidth;
 	return true;
 }
 

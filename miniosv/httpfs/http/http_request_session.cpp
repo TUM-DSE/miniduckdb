@@ -76,7 +76,9 @@ HTTPRequestSnapshotPublication HTTPRequestSession::TryPublish(const shared_ptr<c
 }
 
 unique_ptr<HTTPResponse> HTTPRequestSession::Request(BaseRequest &request) {
-	if (transport_session) {
+	// A client-free backend gets nothing from the transport manager but its lock, taken on every request.
+	if (transport_session &&
+	    request.params.http_util.GetTransportReusePolicy() != HTTPTransportReusePolicy::CLIENT_FREE) {
 		return transport_session->Request(request);
 	}
 	return request.params.http_util.Request(request);

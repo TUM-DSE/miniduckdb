@@ -20,8 +20,9 @@ unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params,
 	return HTTPFSUtil::InitializeClient(http_params, proto_host_port);
 }
 
+// mininet keeps its own connections, so there is no client worth pooling.
 HTTPTransportReusePolicy HTTPFSCurlUtil::GetTransportReusePolicy() const {
-	return HTTPFSUtil::GetTransportReusePolicy();
+	return HTTPTransportReusePolicy::CLIENT_FREE;
 }
 
 string HTTPFSCurlUtil::GetName() const {
