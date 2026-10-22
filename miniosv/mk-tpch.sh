@@ -23,7 +23,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 duckdb_root=$(cd "$here/.." && pwd)
-miniosv_root=$(cd "$here/../../.." && pwd)
+miniosv_root=$(cd "$here/../kernel" && pwd)
 
 src=""
 img=""
