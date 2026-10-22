@@ -2541,10 +2541,13 @@ LIMIT 5)");
 		if (!style.layout_on.empty()) {
 			style.layout_off = ShellHighlight::ResetTerminalCode();
 		}
+#ifdef HAVE_LINENOISE
 		if (linenoiseGetTerminalColorMode() == LINENOISE_LIGHT_MODE) {
 			style.heading_on = ShellHighlight::TerminalCode(PrintColor::BLACK, PrintIntensity::BOLD);
 			style.path_on = ShellHighlight::TerminalCode(PrintColor::BLACK, PrintIntensity::STANDARD);
-		} else {
+		} else
+#endif
+		{
 			style.heading_on = ShellHighlight::TerminalCode(PrintColor::WHITE, PrintIntensity::BOLD);
 			style.path_on = ShellHighlight::TerminalCode(PrintColor::WHITE, PrintIntensity::STANDARD);
 		}
