@@ -386,6 +386,7 @@ static void report_net(int qn, double wall_ms, const mininet::conn_stats &a,
 //     tpch --sf 1 1 6 10     run Q01, Q06, Q10 at sf=1
 //     tpch --sf 1            run all 22
 //     tpch --sf 1 --async 64 run all 22 with 64 async I/O threads
+//     tpch --sf 1 --file-cache 6 6   run Q06 twice, the second from DuckDB's external file cache
 int run_tpch(int argc, char **argv)
 {
 	double sf = 1.0;
@@ -393,6 +394,7 @@ int run_tpch(int argc, char **argv)
 	int async_threads = -1;
 	const char *memlimit = nullptr;
 	bool profile = false;
+	bool file_cache = false;
 	std::vector<int> queries;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--sf") == 0 && i + 1 < argc) {
@@ -405,6 +407,8 @@ int run_tpch(int argc, char **argv)
 			memlimit = argv[++i];
 		} else if (strcmp(argv[i], "--profile") == 0) {
 			profile = true;
+		} else if (strcmp(argv[i], "--file-cache") == 0) {
+			file_cache = true;
 		} else if (argv[i][0] == '-') {
 			printf("FAIL: unknown option '%s'\n", argv[i]);
 			return 1;
@@ -477,13 +481,14 @@ int run_tpch(int argc, char **argv)
 	// Several queries share this connection, so DuckDB's external file cache
 	// would serve a later query out of RAM instead of S3 and the network
 	// measurement would quietly become a memory one. It defaults to true and
-	// is GLOBAL_ONLY, so it has to go off here, before the first query.
+	// is GLOBAL_ONLY, so it has to go off here, before the first query, unless
+	// --file-cache asks for exactly that to take the network out.
 	// parquet_metadata_cache and enable_http_metadata_cache already default
 	// to false, and enable_object_cache is a no-op in this version.
 	{
-		auto cr = con.Query("SET enable_external_file_cache=false");
+		auto cr = con.Query(file_cache ? "SET enable_external_file_cache=true" : "SET enable_external_file_cache=false");
 		if (cr->HasError()) {
-			printf("FAIL: disabling the external file cache: %s\n", cr->GetError().c_str());
+			printf("FAIL: setting the external file cache: %s\n", cr->GetError().c_str());
 			return 1;
 		}
 	}
